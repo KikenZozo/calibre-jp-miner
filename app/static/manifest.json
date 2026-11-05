@@ -1,7 +1,7 @@
 {
-  "name": "YomiCalibre — Immersion & Minage Japonais",
+  "name": "YomiCalibre — Japanese Immersion & i+1 Miner",
   "short_name": "YomiCalibre",
-  "description": "Lecteur EPUB Calibre avec prédécoupage japonais et création automatique de cartes Anki",
+  "description": "Pre-segmented Japanese EPUB/PDF Reader and Batch i+1 Sentence Miner for Calibre & Anki",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#121418",

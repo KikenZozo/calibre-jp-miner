@@ -68,7 +68,7 @@ body {
   display: none !important;
 }
 
-/* Structure globale Flexbox sans aucun élément flottant sur la lecture */
+/* Full-screen Flexbox layout without floating overlays */
 #app-shell {
   display: flex;
   flex-direction: column;
@@ -76,7 +76,6 @@ body {
   width: 100%;
 }
 
-/* Barre supérieure */
 #top-bar {
   flex: 0 0 50px;
   display: flex;
@@ -109,7 +108,32 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 240px;
+  max-width: 220px;
+}
+
+.segmented-inline {
+  display: inline-flex;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.mode-tab {
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  border-radius: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mode-tab.active {
+  background: var(--accent);
+  color: #fff;
 }
 
 .chapter-controls {
@@ -184,7 +208,6 @@ body {
   border-radius: 99px;
 }
 
-/* Zone principale */
 #main-workspace {
   flex: 1 1 auto;
   display: flex;
@@ -201,8 +224,9 @@ body {
   overflow: hidden;
 }
 
-/* VUE BIBLIOTHÈQUE CALIBRE */
-#view-library {
+/* Library View */
+#view-library,
+#view-candidates {
   overflow-y: auto;
   padding: 24px 18px 40px;
   max-width: 1080px;
@@ -210,7 +234,8 @@ body {
   margin: 0 auto;
 }
 
-.library-header {
+.library-header,
+.candidates-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -219,7 +244,8 @@ body {
   margin-bottom: 22px;
 }
 
-.library-header h1 {
+.library-header h1,
+.candidates-header h2 {
   font-size: 22px;
 }
 
@@ -229,7 +255,8 @@ body {
   margin-top: 3px;
 }
 
-.library-actions {
+.library-actions,
+.candidates-actions {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -248,7 +275,7 @@ body {
 
 .books-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 16px;
 }
 
@@ -261,12 +288,10 @@ body {
   flex-direction: column;
   justify-content: space-between;
   gap: 12px;
-  cursor: pointer;
   transition: transform 0.15s, border-color 0.15s;
 }
 
 .book-card:hover {
-  transform: translateY(-2px);
   border-color: var(--accent-light);
 }
 
@@ -282,22 +307,38 @@ body {
   margin-top: 4px;
 }
 
+.book-meta-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.meta-chip {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.meta-chip.cached {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: transparent;
+}
+
 .book-card-footer {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 12px;
-  color: var(--text-muted);
+  gap: 8px;
   padding-top: 10px;
   border-top: 1px solid var(--border-color);
 }
 
-.progress-tag {
-  color: var(--accent-light);
-  font-weight: 600;
-}
-
-/* VUE LECTEUR : Split-View Flexbox strict (aucune superposition) */
+/* Reader Split-View */
 #view-reader {
   display: flex;
   flex-direction: column;
@@ -310,7 +351,6 @@ body {
   overflow-y: auto;
   padding: 28px 18px 40px;
   scroll-behavior: smooth;
-  /* Empêche le menu Copier/Rechercher natif d'Android/iOS au tap sur un mot */
   user-select: none;
   -webkit-user-select: none;
 }
@@ -349,20 +389,17 @@ body {
   transition: background-color 0.15s;
 }
 
-/* Lorsqu'un mot est cliqué, sa phrase entière a un très léger fond subtil pour situer le contexte */
 .reader-sentence.active-sentence {
   background-color: var(--accent-soft);
 }
 
-/* MOTS PRÉDÉCOUPÉS : Totalement invisibles tant qu'on ne clique pas dessus */
+/* Pre-segmented words: completely invisible until clicked */
 .jp-word {
   display: inline;
   cursor: pointer;
   border-radius: 3px;
-  /* Aucun soulignement, aucune couleur, aucun furigana parasite pendant la lecture */
 }
 
-/* Uniquement le mot actuellement cliqué est souligné */
 .jp-word.active-word {
   text-decoration: underline;
   text-decoration-color: var(--accent-light);
@@ -382,7 +419,7 @@ body {
   gap: 12px;
 }
 
-/* PANNEAU FIXE EN BAS (DOCK INTÉGRÉ AU FLUX FLEXBOX — NE SURVOLE JAMAIS LE TEXTE) */
+/* Fixed Integrated Bottom Dock */
 .inspector-dock {
   flex: 0 0 auto;
   width: 100%;
@@ -434,6 +471,15 @@ body {
   background: var(--accent-soft);
   padding: 2px 8px;
   border-radius: 5px;
+}
+
+.insp-freq-badge {
+  font-size: 11px;
+  color: var(--success);
+  background: var(--success-soft);
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-weight: 600;
 }
 
 .inspector-readings {
@@ -539,7 +585,6 @@ body {
   font-weight: 700;
 }
 
-/* Boutons standards */
 .btn-primary {
   background: var(--accent);
   color: #fff;
@@ -570,7 +615,6 @@ body {
   gap: 6px;
 }
 
-/* Modales */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -595,7 +639,7 @@ body {
 }
 
 .modal-large {
-  max-width: 760px;
+  max-width: 780px;
 }
 
 .modal-header {
@@ -647,7 +691,7 @@ body {
 }
 
 .mined-card-item {
-  background: var(--bg-main);
+  background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: 10px;
   padding: 12px 14px;
@@ -660,6 +704,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -675,10 +720,10 @@ body {
 }
 
 .mined-card-sentence {
-  font-size: 14px;
+  font-size: 15px;
   color: var(--text-primary);
-  background: var(--bg-surface);
-  padding: 7px 10px;
+  background: var(--bg-main);
+  padding: 8px 12px;
   border-radius: 6px;
   border-left: 3px solid var(--accent);
 }
@@ -694,7 +739,6 @@ body {
   color: var(--text-secondary);
 }
 
-/* Formulaire Réglages */
 .settings-form .setting-group {
   display: flex;
   flex-direction: column;
@@ -746,11 +790,6 @@ body {
   gap: 10px;
   flex-wrap: wrap;
   font-size: 13px;
-}
-
-.hint {
-  font-size: 11px;
-  color: var(--text-muted);
 }
 
 .divider {

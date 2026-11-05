@@ -1,5 +1,7 @@
 /**
- * YomiCalibre — Logique Frontend (Lecteur pré-découpé sans pop-up flottante + Auto-Minage Anki)
+ * YomiCalibre — Frontend Application
+ * Supports both Interactive Pre-Segmented Reading (with fixed bottom panel)
+ * and Batch i+1 Sentence Mining over cached books.
  */
 
 const state = {
@@ -9,6 +11,7 @@ const state = {
   chapterData: null,
   sentencesMap: {},
   lastClickedPayload: null,
+  activeMode: "reader", // 'reader' | 'candidates'
   settings: {
     anki_deck_name: "Data Mining",
     anki_model_name: "YomiCalibre Mining",
@@ -17,7 +20,6 @@ const state = {
   },
 };
 
-// --- Initialisation ---
 document.addEventListener("DOMContentLoaded", async () => {
   initLocalPreferences();
   bindUIEvents();
@@ -64,7 +66,6 @@ function applyFontFamily(type) {
   if (sel) sel.value = type;
 }
 
-// --- Chargement des paramètres et de la bibliothèque Calibre ---
 async function loadSettings() {
   try {
     const res = await fetch("/api/settings");
@@ -72,16 +73,22 @@ async function loadSettings() {
     state.settings = data;
     document.getElementById("chk-auto-mine").checked = !!data.auto_mine_on_click;
     document.getElementById("inp-deck-name").value = data.anki_deck_name || "Data Mining";
+    document.getElementById("inp-model-name").value =
+      data.anki_model_name || "YomiCalibre Mining";
     document.getElementById("inp-ankiconnect-url").value =
       data.ankiconnect_url || "http://127.0.0.1:8765";
     document.getElementById("modal-deck-name").textContent =
       data.anki_deck_name || "Data Mining";
 
+    if (typeof data.known_words_count === "number") {
+      document.getElementById("lbl-known-count").textContent =
+        data.known_words_count.toLocaleString();
+    }
     if (data.dictionary_stats) {
       updateDictStatsLabel(data.dictionary_stats);
     }
-  } catch (e) {
-    console.error("Erreur chargement réglages:", e);
+  } catch (err) {
+    console.error("Failed to load settings:", err);
   }
 }
 
@@ -89,15 +96,22 @@ function updateDictStatsLabel(stats) {
   const lbl = document.getElementById("dict-stats-label");
   if (!lbl) return;
   if (stats.is_full_jmdict) {
-    lbl.textContent = `✅ Dictionnaire JMdict complet actif (${stats.total_entries.toLocaleString()} entrées FR/EN)`;
+    lbl.textContent = `✅ Full JMdict active (${stats.total_entries.toLocaleString()} entries)`;
   } else {
-    lbl.textContent = `⚡ Dictionnaire de base actif (${stats.total_entries} entrées FR/EN)`;
+    lbl.textContent = `⚡ Core dictionary active (${stats.total_entries} entries)`;
   }
+}
+
+function formatBytes(bytes) {
+  if (!bytes || bytes <= 0) return "Size unknown";
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1) return `${mb.toFixed(1)} MB`;
+  return `${Math.round(bytes / 1024)} KB`;
 }
 
 async function loadLibrary(query = "") {
   const grid = document.getElementById("books-grid");
-  grid.innerHTML = `<p class="subtitle">Lecture de l'index léger metadata.db (aucun téléchargement Drive)...</p>`;
+  grid.innerHTML = `<p class="subtitle">Reading metadata.db index (0 Drive bytes accessed)...</p>`;
   try {
     const url = query
       ? `/api/books?q=${encodeURIComponent(query)}`
@@ -105,16 +119,20 @@ async function loadLibrary(query = "") {
     const res = await fetch(url);
     const data = await res.json();
     state.books = data.books || [];
+    if (typeof data.known_words_count === "number") {
+      document.getElementById("lbl-known-count").textContent =
+        data.known_words_count.toLocaleString();
+    }
     renderLibraryGrid();
-  } catch (e) {
-    grid.innerHTML = `<p class="subtitle">Erreur lors du chargement de la bibliothèque.</p>`;
+  } catch (err) {
+    grid.innerHTML = `<p class="subtitle">Error loading library index.</p>`;
   }
 }
 
 function renderLibraryGrid() {
   const grid = document.getElementById("books-grid");
   if (!state.books.length) {
-    grid.innerHTML = `<p class="subtitle">Aucun livre trouvé. Placez vos EPUBs dans votre bibliothèque Calibre ou cliquez sur « Importer un .epub ».</p>`;
+    grid.innerHTML = `<p class="subtitle">No books found in metadata.db or uploads.</p>`;
     return;
   }
 
@@ -123,28 +141,48 @@ function renderLibraryGrid() {
     const card = document.createElement("div");
     card.className = "book-card";
 
-    const prog = book.progress;
-    const progText = prog
-      ? `Chapitre ${(prog.chapter_index || 0) + 1} · En cours`
-      : "Nouveau";
+    const fmtBadge = `<span class="meta-chip">${escapeHtml(book.preferred_format || "EPUB")}</span>`;
+    const sizeBadge = `<span class="meta-chip">${escapeHtml(formatBytes(book.uncompressed_size))}</span>`;
+    const symlinkBadge = book.is_symlink
+      ? `<span class="meta-chip" title="Symlink into /home/enzo/calibre/gdrive">☁️ Drive Symlink</span>`
+      : `<span class="meta-chip">💾 Local Disk</span>`;
+    const cacheBadge = book.is_extracted
+      ? `<span class="meta-chip cached">✅ Cached (${book.total_sentences} sents)</span>`
+      : `<span class="meta-chip">⏳ Extract on open</span>`;
 
     card.innerHTML = `
       <div>
         <div class="book-card-title">${escapeHtml(book.title)}</div>
         <div class="book-card-author">${escapeHtml(book.author)}</div>
+        <div class="book-meta-badges">
+          ${fmtBadge}
+          ${sizeBadge}
+          ${symlinkBadge}
+          ${cacheBadge}
+        </div>
       </div>
       <div class="book-card-footer">
-        <span>${escapeHtml(book.source || "Calibre")}</span>
-        <span class="progress-tag">${escapeHtml(progText)}</span>
+        <button class="btn-secondary btn-open-reader" style="flex:1;justify-content:center;">
+          📖 Read
+        </button>
+        <button class="btn-primary btn-open-candidates" style="flex:1;justify-content:center;">
+          🎯 Mine i+1
+        </button>
       </div>
     `;
-    card.addEventListener("click", () => openBook(book));
+
+    card.querySelector(".btn-open-reader").addEventListener("click", () => {
+      openBook(book, "reader");
+    });
+    card.querySelector(".btn-open-candidates").addEventListener("click", () => {
+      openBook(book, "candidates");
+    });
+
     grid.appendChild(card);
   }
 }
 
-// --- Ouverture d'un livre et rendu des chapitres pré-découpés ---
-async function openBook(book, chapterIndex = null) {
+async function openBook(book, initialMode = "reader", chapterIndex = null) {
   state.currentBook = book;
   const targetChapter =
     chapterIndex !== null
@@ -154,26 +192,48 @@ async function openBook(book, chapterIndex = null) {
       : 0;
 
   document.getElementById("view-library").classList.add("hidden");
-  document.getElementById("view-reader").classList.remove("hidden");
   document.getElementById("btn-back-library").classList.remove("hidden");
-  document.getElementById("chapter-nav-controls").classList.remove("hidden");
+  document.getElementById("book-mode-tabs").classList.remove("hidden");
 
   const breadcrumb = document.getElementById("current-book-label");
   breadcrumb.textContent = book.title;
   breadcrumb.classList.remove("hidden");
 
   closeInspectorDock();
-  await loadChapter(book.book_id, targetChapter, book.progress?.scroll_ratio || 0);
+  await switchBookMode(initialMode, targetChapter, book.progress?.scroll_ratio || 0);
+}
+
+async function switchBookMode(mode, chapterIndex = null, restoreScrollRatio = 0) {
+  state.activeMode = mode;
+  document.getElementById("tab-mode-reader").classList.toggle("active", mode === "reader");
+  document
+    .getElementById("tab-mode-candidates")
+    .classList.toggle("active", mode === "candidates");
+
+  if (mode === "reader") {
+    document.getElementById("view-candidates").classList.add("hidden");
+    document.getElementById("view-reader").classList.remove("hidden");
+    document.getElementById("chapter-nav-controls").classList.remove("hidden");
+    const targetSec =
+      chapterIndex !== null ? chapterIndex : state.currentChapterIndex || 0;
+    await loadChapter(state.currentBook.book_id, targetSec, restoreScrollRatio);
+  } else {
+    closeInspectorDock();
+    document.getElementById("view-reader").classList.add("hidden");
+    document.getElementById("chapter-nav-controls").classList.add("hidden");
+    document.getElementById("view-candidates").classList.remove("hidden");
+    await loadBookCandidates(state.currentBook.book_id);
+  }
 }
 
 async function loadChapter(bookId, chapterIndex, restoreScrollRatio = 0) {
   const article = document.getElementById("reader-content");
-  article.innerHTML = `<p class="subtitle">Analyse morphologique et découpage des phrases en cours...</p>`;
+  article.innerHTML = `<p class="subtitle">Extracting & loading permanent cache from mining.db...</p>`;
   closeInspectorDock();
 
   try {
-    const res = await fetch(`/api/books/${bookId}/chapter/${chapterIndex}`);
-    if (!res.ok) throw new Error("Erreur chargement chapitre");
+    const res = await fetch(`/api/books/${encodeURIComponent(bookId)}/chapter/${chapterIndex}`);
+    if (!res.ok) throw new Error("Failed to load section");
     const data = await res.json();
 
     state.currentChapterIndex = data.chapter_index;
@@ -196,8 +256,8 @@ async function loadChapter(bookId, chapterIndex, restoreScrollRatio = 0) {
     }
 
     saveCurrentProgress();
-  } catch (e) {
-    article.innerHTML = `<p class="subtitle">Impossible de charger ce chapitre.</p>`;
+  } catch (err) {
+    article.innerHTML = `<p class="subtitle">Could not extract or load this section.</p>`;
   }
 }
 
@@ -250,6 +310,7 @@ function renderTokenizedChapter(data) {
           wordSpan.dataset.surfHira = tok.surface_hiragana || "";
           wordSpan.dataset.surfKata = tok.surface_katakana || "";
           wordSpan.dataset.posDetail = tok.pos_detail || "";
+          wordSpan.dataset.freq = tok.frequency_rank || "";
           sentSpan.appendChild(wordSpan);
         }
       }
@@ -262,9 +323,95 @@ function renderTokenizedChapter(data) {
   article.appendChild(frag);
 }
 
-// --- Clic sur un mot prédécoupé : Affichage dans le panneau fixe bas + Création Carte Anki ---
+// --- Batch i+1 Candidate Sentences Mode ---
+async function loadBookCandidates(bookId) {
+  const listEl = document.getElementById("candidates-list");
+  const subEl = document.getElementById("candidates-subtitle");
+  listEl.innerHTML = `<p class="subtitle">Computing i+1 sentence candidates against your known vocabulary...</p>`;
+
+  try {
+    const res = await fetch(`/api/books/${encodeURIComponent(bookId)}/candidates?limit=80`);
+    const data = await res.json();
+    const cands = data.candidates || [];
+
+    subEl.textContent = `Book sentences: ${data.total_book_sentences} · Known words: ${data.known_words_count} · Top ${cands.length} candidates ranked by frequency`;
+
+    if (!cands.length) {
+      listEl.innerHTML = `<p class="subtitle">No candidate sentences found.</p>`;
+      return;
+    }
+
+    listEl.innerHTML = "";
+    for (const cand of cands) {
+      const item = document.createElement("div");
+      item.className = "mined-card-item";
+      const frDefs = (cand.definitions_fr || []).join(" ; ");
+      const enDefs = (cand.definitions_en || []).join(" ; ");
+
+      item.innerHTML = `
+        <div class="mined-card-top">
+          <div>
+            <span class="mined-card-word">${escapeHtml(cand.base)}</span>
+            <span class="mined-card-reading">【${escapeHtml(cand.reading_hiragana)} / ${escapeHtml(cand.reading_katakana)}】</span>
+            <span class="insp-pos-badge">${escapeHtml(cand.pos_detail)}</span>
+            <span class="insp-freq-badge">Freq #${cand.frequency_rank} · ${cand.book_occurrences}× in book</span>
+          </div>
+          <div>
+            <button class="btn-primary btn-mine-cand">➕ Mine to Anki</button>
+          </div>
+        </div>
+        <div class="mined-card-sentence">${cand.sentence_html}</div>
+        <div class="mined-card-defs">
+          ${frDefs ? `<div>🇫🇷 ${escapeHtml(frDefs)}</div>` : ""}
+          ${enDefs ? `<div>🇬🇧 ${escapeHtml(enDefs)}</div>` : ""}
+        </div>
+      `;
+
+      const mineBtn = item.querySelector(".btn-mine-cand");
+      mineBtn.addEventListener("click", async () => {
+        mineBtn.disabled = true;
+        mineBtn.textContent = "⏳...";
+        const payload = {
+          book_id: data.book_id,
+          book_title: data.book_title,
+          chapter_title: cand.section_title,
+          wid: cand.wid,
+          sid: cand.sid,
+          surface: cand.surface,
+          base: cand.base,
+          reading_hiragana: cand.reading_hiragana,
+          reading_katakana: cand.reading_katakana,
+          pos_detail: cand.pos_detail,
+          sentence_tokens: cand.sentence_tokens,
+          force_mine: true,
+        };
+        const r = await fetch("/api/word/click", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const out = await r.json();
+        if (out.mined_card && !out.mined_card.anki_synced) {
+          await tryPushCardViaBrowserAnkiConnect(
+            out.mined_card,
+            state.settings.anki_deck_name || "Data Mining",
+            state.settings.anki_model_name || "YomiCalibre Mining",
+            out.mined_card.anki_model_spec
+          );
+        }
+        mineBtn.textContent = "✅ Mined";
+        await refreshAnkiBadgeAndTryAutoFlush();
+      });
+
+      listEl.appendChild(item);
+    }
+  } catch (err) {
+    listEl.innerHTML = `<p class="subtitle">Error computing i+1 candidates.</p>`;
+  }
+}
+
+// --- Interactive Word Click Handler ---
 async function handleWordClick(wordEl) {
-  // 1. Nettoyer la sélection précédente
   document.querySelectorAll(".jp-word.active-word").forEach((el) => {
     el.classList.remove("active-word");
   });
@@ -272,7 +419,6 @@ async function handleWordClick(wordEl) {
     el.classList.remove("active-sentence");
   });
 
-  // 2. Marquer uniquement le mot cliqué et sa phrase
   wordEl.classList.add("active-word");
   const parentSentEl = wordEl.closest(".reader-sentence");
   if (parentSentEl) {
@@ -302,10 +448,8 @@ async function handleWordClick(wordEl) {
   };
   state.lastClickedPayload = payload;
 
-  // 3. Ouvrir le panneau fixe intégré en bas (sans jamais survoler le texte)
   openInspectorDockLoading(payload);
 
-  // S'assurer que la ligne cliquée reste bien visible au-dessus du panneau bas
   requestAnimationFrame(() => {
     ensureWordVisibleInViewport(wordEl);
   });
@@ -319,8 +463,6 @@ async function handleWordClick(wordEl) {
     const result = await res.json();
     renderInspectorDockResult(result);
 
-    // Si une carte Anki a été créée et n'a pas encore été poussée par le serveur vers AnkiConnect,
-    // on tente aussi de l'envoyer directement depuis le navigateur vers AnkiConnect local (127.0.0.1:8765)
     if (result.mined_card) {
       if (!result.mined_card.anki_synced) {
         const pushedLocally = await tryPushCardViaBrowserAnkiConnect(
@@ -331,13 +473,13 @@ async function handleWordClick(wordEl) {
         );
         if (pushedLocally) {
           document.getElementById("insp-anki-status").textContent =
-            `✅ Carte Anki créée (${state.settings.anki_deck_name})`;
+            `✅ Added to Anki (${state.settings.anki_deck_name})`;
         }
       }
       await refreshAnkiBadgeAndTryAutoFlush();
     }
-  } catch (e) {
-    console.error("Erreur lors de la consultation du mot:", e);
+  } catch (err) {
+    console.error("Word lookup failed:", err);
   }
 }
 
@@ -348,16 +490,17 @@ function openInspectorDockLoading(payload) {
   document.getElementById("insp-word-base").textContent = payload.base || payload.surface;
   const surfEl = document.getElementById("insp-word-surface");
   if (payload.surface && payload.surface !== payload.base) {
-    surfEl.textContent = `dans le texte : ${payload.surface}`;
+    surfEl.textContent = `surface: ${payload.surface}`;
     surfEl.classList.remove("hidden");
   } else {
     surfEl.classList.add("hidden");
   }
 
-  document.getElementById("insp-pos").textContent = payload.pos_detail || "Mot";
+  document.getElementById("insp-pos").textContent = payload.pos_detail || "Word";
+  document.getElementById("insp-freq").textContent = "";
   document.getElementById("insp-hira").textContent = payload.reading_hiragana || "...";
   document.getElementById("insp-kata").textContent = payload.reading_katakana || "...";
-  document.getElementById("insp-definitions").innerHTML = `<span class="def-line-en">Recherche de la définition...</span>`;
+  document.getElementById("insp-definitions").innerHTML = `<span class="def-line-en">Looking up definition...</span>`;
   document.getElementById("insp-anki-status").textContent = "⏳...";
 }
 
@@ -365,9 +508,11 @@ function renderInspectorDockResult(result) {
   document.getElementById("insp-word-base").textContent = result.base || result.surface;
   document.getElementById("insp-hira").textContent = result.reading_hiragana || "";
   document.getElementById("insp-kata").textContent = result.reading_katakana || "";
-  document.getElementById("insp-pos").textContent = result.pos_detail || "Mot";
+  document.getElementById("insp-pos").textContent = result.pos_detail || "Word";
+  document.getElementById("insp-freq").textContent = result.frequency_rank
+    ? `Freq #${result.frequency_rank}`
+    : "";
 
-  // Définitions Français + Anglais
   const defsBox = document.getElementById("insp-definitions");
   const frList = result.definitions_fr || [];
   const enList = result.definitions_en || [];
@@ -380,23 +525,21 @@ function renderInspectorDockResult(result) {
     defsHtml += `<div class="def-line-en">🇬🇧 ${escapeHtml(enList.join(" ; "))}</div>`;
   }
   if (!frList.length && !enList.length) {
-    defsHtml = `<div class="def-line-en">Terme propre / Forme conjuguée (${escapeHtml(result.surface_hiragana || result.reading_hiragana)})</div>`;
+    defsHtml = `<div class="def-line-en">Inflected / Proper term (${escapeHtml(result.surface_hiragana || result.reading_hiragana)})</div>`;
   }
   defsBox.innerHTML = defsHtml;
 
-  // Phrase de contexte avec le mot souligné (<u>mot</u>)
   document.getElementById("insp-sentence-html").innerHTML = result.sentence_html || "";
 
-  // Statut Anki
   const statusEl = document.getElementById("insp-anki-status");
   const manualBtn = document.getElementById("btn-manual-mine");
   if (result.mined_card) {
     manualBtn.classList.add("hidden");
     statusEl.classList.remove("hidden");
     if (result.mined_card.anki_synced) {
-      statusEl.textContent = `✅ Carte Anki créée (${state.settings.anki_deck_name})`;
+      statusEl.textContent = `✅ Added to Anki (${state.settings.anki_deck_name})`;
     } else {
-      statusEl.textContent = `📥 Ajouté au deck « ${state.settings.anki_deck_name} »`;
+      statusEl.textContent = `📥 Queued in '${state.settings.anki_deck_name}'`;
     }
   } else {
     statusEl.classList.add("hidden");
@@ -420,15 +563,13 @@ function ensureWordVisibleInViewport(wordEl) {
   const vpRect = viewport.getBoundingClientRect();
   const wordRect = wordEl.getBoundingClientRect();
 
-  // Si le mot cliqué se retrouve trop bas (près du bord inférieur de la zone de lecture),
-  // on ajuste le scroll de la zone de lecture pour garder la phrase bien au-dessus du panneau fixe.
   if (wordRect.bottom > vpRect.bottom - 24) {
     const delta = wordRect.bottom - (vpRect.bottom - 48);
     viewport.scrollBy({ top: delta, behavior: "smooth" });
   }
 }
 
-// --- Pont AnkiConnect Navigateur (pour synchroniser automatiquement quand le PC portable est ouvert) ---
+// --- Browser-to-AnkiConnect Bridge (Windows PC) ---
 async function tryPushCardViaBrowserAnkiConnect(card, deckName, modelName, modelSpec) {
   const urlsToTry = ["http://127.0.0.1:8765", "http://localhost:8765"];
   if (
@@ -440,16 +581,13 @@ async function tryPushCardViaBrowserAnkiConnect(card, deckName, modelName, model
 
   for (const url of urlsToTry) {
     try {
-      // 1. Créer le deck Data Mining
       await invokeAnkiConnectBrowser(url, "createDeck", { deck: deckName });
 
-      // 2. Créer le modèle s'il n'existe pas
       const models = await invokeAnkiConnectBrowser(url, "modelNames", {});
       if (Array.isArray(models) && !models.includes(modelName) && modelSpec) {
         await invokeAnkiConnectBrowser(url, "createModel", modelSpec);
       }
 
-      // 3. Ajouter la note
       const noteId = await invokeAnkiConnectBrowser(url, "addNote", {
         note: {
           deckName: deckName,
@@ -468,9 +606,7 @@ async function tryPushCardViaBrowserAnkiConnect(card, deckName, modelName, model
         });
         return true;
       }
-    } catch (_) {
-      // Anki n'est pas ouvert sur cet appareil (ex: lecture sur téléphone), la carte reste bien au chaud sur le serveur
-    }
+    } catch (_) {}
   }
   return false;
 }
@@ -500,8 +636,11 @@ async function refreshAnkiBadgeAndTryAutoFlush() {
     const unsyncedCards = data.cards || [];
     updateUnsyncedBadge(unsyncedCards.length);
 
-    // Si des cartes minées sur le téléphone sont en attente et qu'Anki est ouvert sur ce PC,
-    // on les pousse automatiquement vers Anki !
+    if (typeof data.known_words_count === "number") {
+      document.getElementById("lbl-known-count").textContent =
+        data.known_words_count.toLocaleString();
+    }
+
     if (unsyncedCards.length > 0) {
       let flushedCount = 0;
       for (const card of unsyncedCards) {
@@ -532,14 +671,13 @@ function updateUnsyncedBadge(count) {
   }
 }
 
-// --- Sauvegarde automatique de la progression ---
 function saveCurrentProgress() {
   if (!state.currentBook) return;
   const viewport = document.getElementById("reader-viewport");
   const maxScroll = viewport.scrollHeight - viewport.clientHeight;
   const ratio = maxScroll > 0 ? viewport.scrollTop / maxScroll : 0;
 
-  fetch(`/api/books/${state.currentBook.book_id}/progress`, {
+  fetch(`/api/books/${encodeURIComponent(state.currentBook.book_id)}/progress`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -550,9 +688,21 @@ function saveCurrentProgress() {
   }).catch(() => {});
 }
 
-// --- Événements de l'interface ---
+async function triggerAnkiSnapshotSync() {
+  try {
+    const res = await fetch("/api/anki/sync-snapshot", { method: "POST" });
+    const data = await res.json();
+    if (typeof data.total_known_words === "number") {
+      document.getElementById("lbl-known-count").textContent =
+        data.total_known_words.toLocaleString();
+    }
+    return data;
+  } catch (_) {
+    return null;
+  }
+}
+
 function bindUIEvents() {
-  // Délégation de clic sur les mots prédécoupés dans le lecteur
   const readerViewport = document.getElementById("reader-viewport");
   readerViewport.addEventListener("click", (e) => {
     const wordEl = e.target.closest(".jp-word");
@@ -560,22 +710,18 @@ function bindUIEvents() {
       e.stopPropagation();
       handleWordClick(wordEl);
     } else if (!e.target.closest(".chapter-footer-nav")) {
-      // Clic dans la marge ou sur de la ponctuation : referme proprement le panneau du bas
       closeInspectorDock();
     }
   });
 
-  // Sauvegarde du scroll à la lecture
   let scrollTimer = null;
   readerViewport.addEventListener("scroll", () => {
     if (scrollTimer) clearTimeout(scrollTimer);
     scrollTimer = setTimeout(saveCurrentProgress, 600);
   });
 
-  // Fermer le panneau bas
   document.getElementById("btn-close-inspector").addEventListener("click", closeInspectorDock);
 
-  // Bouton minage manuel (si Auto-Anki est décoché)
   document.getElementById("btn-manual-mine").addEventListener("click", async () => {
     if (!state.lastClickedPayload) return;
     const payload = { ...state.lastClickedPayload, force_mine: true };
@@ -597,18 +743,25 @@ function bindUIEvents() {
     await refreshAnkiBadgeAndTryAutoFlush();
   });
 
-  // Retour à la bibliothèque Calibre
+  document.getElementById("tab-mode-reader").addEventListener("click", () => {
+    if (state.currentBook) switchBookMode("reader");
+  });
+  document.getElementById("tab-mode-candidates").addEventListener("click", () => {
+    if (state.currentBook) switchBookMode("candidates");
+  });
+
   document.getElementById("btn-back-library").addEventListener("click", async () => {
     closeInspectorDock();
     document.getElementById("view-reader").classList.add("hidden");
+    document.getElementById("view-candidates").classList.add("hidden");
     document.getElementById("view-library").classList.remove("hidden");
     document.getElementById("btn-back-library").classList.add("hidden");
+    document.getElementById("book-mode-tabs").classList.add("hidden");
     document.getElementById("chapter-nav-controls").classList.add("hidden");
     document.getElementById("current-book-label").classList.add("hidden");
     await loadLibrary();
   });
 
-  // Navigation entre chapitres
   document.getElementById("select-chapter").addEventListener("change", (e) => {
     if (!state.currentBook) return;
     loadChapter(state.currentBook.book_id, parseInt(e.target.value, 10));
@@ -634,7 +787,6 @@ function bindUIEvents() {
     }
   });
 
-  // Toggle Auto-Mine au clic
   document.getElementById("chk-auto-mine").addEventListener("change", async (e) => {
     const val = e.target.checked;
     state.settings.auto_mine_on_click = val;
@@ -645,7 +797,6 @@ function bindUIEvents() {
     });
   });
 
-  // Import d'un fichier .epub
   document.getElementById("file-upload-epub").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -661,7 +812,6 @@ function bindUIEvents() {
     e.target.value = "";
   });
 
-  // Recherche SQL instantanée dans metadata.db (sans toucher aux fichiers EPUB sur le Drive)
   const searchInp = document.getElementById("inp-search-books");
   if (searchInp) {
     let searchTimer = null;
@@ -673,7 +823,6 @@ function bindUIEvents() {
     });
   }
 
-  // Modale Deck Anki Data Mining
   document.getElementById("btn-open-mining-modal").addEventListener("click", async () => {
     document.getElementById("modal-mining").classList.remove("hidden");
     await loadMinedCardsModal();
@@ -683,14 +832,27 @@ function bindUIEvents() {
   });
   document.getElementById("btn-sync-ankiconnect").addEventListener("click", async () => {
     const btn = document.getElementById("btn-sync-ankiconnect");
-    btn.textContent = "⏳ Synchronisation...";
+    btn.textContent = "⏳ Syncing...";
     await fetch("/api/anki/sync-server", { method: "POST" });
     await refreshAnkiBadgeAndTryAutoFlush();
     await loadMinedCardsModal();
-    btn.textContent = "🔄 Synchroniser vers AnkiConnect";
+    btn.textContent = "🔄 Push to AnkiConnect";
   });
 
-  // Modale Réglages
+  document.getElementById("btn-sync-anki-snapshot").addEventListener("click", async () => {
+    const btn = document.getElementById("btn-sync-anki-snapshot");
+    btn.textContent = "⏳ Reading snapshot...";
+    await triggerAnkiSnapshotSync();
+    btn.textContent = "✅ Known Words Synced";
+  });
+
+  document.getElementById("btn-sync-snapshot-inline").addEventListener("click", async () => {
+    await triggerAnkiSnapshotSync();
+    if (state.currentBook) {
+      await loadBookCandidates(state.currentBook.book_id);
+    }
+  });
+
   document.getElementById("btn-open-settings").addEventListener("click", () => {
     document.getElementById("modal-settings").classList.remove("hidden");
   });
@@ -710,6 +872,8 @@ function bindUIEvents() {
 
   document.getElementById("btn-save-settings").addEventListener("click", async () => {
     const deckName = document.getElementById("inp-deck-name").value.trim() || "Data Mining";
+    const modelName =
+      document.getElementById("inp-model-name").value.trim() || "YomiCalibre Mining";
     const ankiUrl =
       document.getElementById("inp-ankiconnect-url").value.trim() ||
       "http://127.0.0.1:8765";
@@ -718,6 +882,7 @@ function bindUIEvents() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         anki_deck_name: deckName,
+        anki_model_name: modelName,
         ankiconnect_url: ankiUrl,
       }),
     });
@@ -730,14 +895,14 @@ function bindUIEvents() {
   document.getElementById("btn-build-jmdict").addEventListener("click", async () => {
     const btn = document.getElementById("btn-build-jmdict");
     btn.disabled = true;
-    btn.textContent = "⏳ Téléchargement et indexation en cours...";
+    btn.textContent = "⏳ Indexing JMdict in background...";
     await fetch("/api/dictionary/build-full", { method: "POST" });
   });
 }
 
 async function loadMinedCardsModal() {
   const listEl = document.getElementById("mined-cards-list");
-  listEl.innerHTML = `<p class="subtitle">Chargement des cartes minées...</p>`;
+  listEl.innerHTML = `<p class="subtitle">Loading mined cards...</p>`;
   try {
     const res = await fetch("/api/anki/cards");
     const data = await res.json();
@@ -745,7 +910,7 @@ async function loadMinedCardsModal() {
     updateUnsyncedBadge(data.unsynced_count || 0);
 
     if (!cards.length) {
-      listEl.innerHTML = `<p class="subtitle">Aucune carte minée pour le moment. Cliquez sur un mot pendant votre lecture pour créer automatiquement une carte avec sa phrase soulignée.</p>`;
+      listEl.innerHTML = `<p class="subtitle">No cards mined yet. Click any word in the reader or in the i+1 tab to generate a card.</p>`;
       return;
     }
 
@@ -756,8 +921,8 @@ async function loadMinedCardsModal() {
       const frDefs = (c.definitions_fr || []).join(" ; ");
       const enDefs = (c.definitions_en || []).join(" ; ");
       const syncTag = c.anki_synced
-        ? `<span class="anki-status-pill">✅ Synchronisé Anki</span>`
-        : `<span class="insp-pos-badge">⏳ En file d'attente</span>`;
+        ? `<span class="anki-status-pill">✅ Synced to Anki</span>`
+        : `<span class="insp-pos-badge">⏳ Queued (GUID: ${escapeHtml(c.guid || "")})</span>`;
 
       item.innerHTML = `
         <div class="mined-card-top">
@@ -767,7 +932,7 @@ async function loadMinedCardsModal() {
           </div>
           <div style="display:flex;align-items:center;gap:6px;">
             ${syncTag}
-            <button class="btn-close-dock btn-del-card" data-cid="${c.id}" title="Supprimer">✕</button>
+            <button class="btn-close-dock btn-del-card" data-cid="${c.id}" title="Delete">✕</button>
           </div>
         </div>
         <div class="mined-card-sentence">${c.sentence_html}</div>
@@ -782,8 +947,8 @@ async function loadMinedCardsModal() {
       });
       listEl.appendChild(item);
     }
-  } catch (e) {
-    listEl.innerHTML = `<p class="subtitle">Erreur lors du chargement des cartes.</p>`;
+  } catch (err) {
+    listEl.innerHTML = `<p class="subtitle">Failed to load cards.</p>`;
   }
 }
 

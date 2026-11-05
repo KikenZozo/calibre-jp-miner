@@ -1,1 +1,1 @@
-"""Calibre Japanese Immersion Reader & Anki Sentence Miner."""
+"""Japanese Text-Mining & Interactive Reader Pipeline for Calibre and Anki."""

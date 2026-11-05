@@ -1,7 +1,7 @@
 import html
 import re
 import sqlite3
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.config import JMDICT_DB_PATH
 
@@ -14,24 +14,24 @@ except ImportError:
     _SUDACHI_AVAILABLE = False
 
 
-# Mapping des parties du discours (POS) de Sudachi/UniDic vers le français
-POS_FR_MAP = {
-    "名詞": "Nom",
-    "代名詞": "Pronom",
-    "動詞": "Verbe",
-    "形容詞": "Adjectif (-i)",
-    "形状詞": "Adjectif (-na)",
-    "副詞": "Adverbe",
+POS_EN_MAP = {
+    "名詞": "Noun",
+    "代名詞": "Pronoun",
+    "動詞": "Verb",
+    "形容詞": "i-Adjective",
+    "形状詞": "na-Adjective",
+    "副詞": "Adverb",
     "連体詞": "Adnominal",
-    "接続詞": "Conjonction",
+    "接続詞": "Conjunction",
     "感動詞": "Interjection",
-    "助詞": "Particule",
-    "助動詞": "Auxiliaire",
-    "接頭辞": "Préfixe",
-    "接尾辞": "Suffixe",
+    "助詞": "Particle",
+    "助動詞": "Auxiliary",
+    "接頭辞": "Prefix",
+    "接尾辞": "Suffix",
 }
 
-# Paires de guillemets et parenthèses japonaises
+CONTENT_POS_SET = {"名詞", "動詞", "形容詞", "形状詞", "副詞", "連体詞", "接続詞"}
+
 OPEN_TO_CLOSE_QUOTES = {
     "「": "」",
     "『": "』",
@@ -45,10 +45,8 @@ OPEN_TO_CLOSE_QUOTES = {
 }
 CLOSE_QUOTES = set(OPEN_TO_CLOSE_QUOTES.values())
 
-# Particules ou continuations qui rattachent une citation à la proposition suivante (ex: 「行くよ！」と彼は言った。)
 QUOTE_CONTINUATION_CHARS = set("とてやかのにをはがも、，・でへよりまでくらいほどなど")
 
-# Auxiliaires courants après la forme en -te/-de (ex: 読んでいる, 食べてしまう)
 TE_FORM_AUX_BASES = {
     "いる",
     "居る",
@@ -72,9 +70,7 @@ TE_FORM_AUX_BASES = {
     "ほしい",
 }
 
-# Règles de déconjugaison japonaise (suffixe de surface -> (terminaison dictionnaire, lecture suffixe))
 DECONJUGATION_RULES = [
-    # Ichidan (-ru) & formes composées
     ("ていなかった", "る"),
     ("ていました", "る"),
     ("ていない", "る"),
@@ -96,7 +92,6 @@ DECONJUGATION_RULES = [
     ("たい", "る"),
     ("た", "る"),
     ("て", "る"),
-    # Godan -ku (書く -> 書いた / 書かない / 書かれている)
     ("かれていた", "く"),
     ("かれている", "く"),
     ("かれた", "く"),
@@ -107,12 +102,10 @@ DECONJUGATION_RULES = [
     ("きます", "く"),
     ("いた", "く"),
     ("いて", "く"),
-    # Godan -gu (泳ぐ -> 泳いだ)
     ("がなかった", "ぐ"),
     ("がない", "ぐ"),
     ("いだ", "ぐ"),
     ("いで", "ぐ"),
-    # Godan -su (話す / 濡らす -> 濡らしていた)
     ("していた", "す"),
     ("している", "す"),
     ("しなかった", "す"),
@@ -121,7 +114,6 @@ DECONJUGATION_RULES = [
     ("します", "す"),
     ("した", "す"),
     ("して", "す"),
-    # Godan -mu / -bu / -nu (読む / 飲む -> 飲みながら)
     ("みながら", "む"),
     ("んでいた", "む"),
     ("んでいる", "む"),
@@ -131,11 +123,9 @@ DECONJUGATION_RULES = [
     ("みます", "む"),
     ("んだ", "む"),
     ("んで", "む"),
-    # Godan -u / -tsu / -ru (言う / 思う / 知る -> 知られていない / 知らない)
     ("られていない", "る"),
     ("られていた", "る"),
     ("られている", "る"),
-    ("らながら", "る"),
     ("わなかった", "う"),
     ("わない", "う"),
     ("いました", "う"),
@@ -150,7 +140,6 @@ DECONJUGATION_RULES = [
     ("って", "る"),
     ("った", "つ"),
     ("って", "つ"),
-    # Adjectifs -i (古い -> 古かった / 古くない)
     ("くなかった", "い"),
     ("くない", "い"),
     ("かった", "い"),
@@ -183,7 +172,6 @@ PARTICLES_SET = {
     "では",
     "へと",
     "にも",
-    "から",
     "だけ",
     "しか",
     "ほど",
@@ -191,11 +179,117 @@ PARTICLES_SET = {
     "ぐらい",
     "など",
     "ながら",
+    "だ",
+    "です",
+    "た",
+    "て",
+}
+
+# Core BCCWJ / JPDB frequency ranks for candidate sorting (lower rank = more common/useful)
+CORE_FREQUENCY_RANKS: Dict[str, int] = {
+    "私": 15,
+    "彼": 42,
+    "彼女": 85,
+    "人": 12,
+    "人間": 140,
+    "世界": 165,
+    "時間": 95,
+    "今日": 110,
+    "昨日": 320,
+    "明日": 280,
+    "今": 28,
+    "言葉": 175,
+    "本": 190,
+    "図書館": 1850,
+    "扉": 1420,
+    "部屋": 410,
+    "窓": 980,
+    "光": 620,
+    "影": 1150,
+    "声": 230,
+    "目": 65,
+    "手": 58,
+    "心": 210,
+    "記憶": 890,
+    "秘密": 1350,
+    "魔法": 1680,
+    "物語": 920,
+    "文字": 1120,
+    "意味": 260,
+    "理由": 390,
+    "本当": 145,
+    "絶対": 540,
+    "静か": 670,
+    "不思議": 940,
+    "古い": 720,
+    "新しい": 195,
+    "深い": 580,
+    "強い": 240,
+    "優しい": 830,
+    "美しい": 760,
+    "重い": 690,
+    "温かい": 1480,
+    "読む": 310,
+    "書く": 270,
+    "話す": 220,
+    "聞く": 130,
+    "見る": 22,
+    "食べる": 290,
+    "飲む": 480,
+    "行く": 35,
+    "来る": 40,
+    "帰る": 340,
+    "開ける": 780,
+    "開く": 510,
+    "閉じる": 1240,
+    "思う": 18,
+    "考える": 105,
+    "知る": 75,
+    "分かる": 115,
+    "忘れる": 490,
+    "覚える": 560,
+    "探す": 640,
+    "見つける": 610,
+    "待つ": 330,
+    "許す": 950,
+    "叫ぶ": 1320,
+    "笑う": 380,
+    "歩く": 460,
+    "走る": 530,
+    "立ち上がる": 1180,
+    "踏み入れる": 3400,
+    "始まる": 275,
+    "終わる": 285,
+    "生きる": 360,
+    "選ぶ": 470,
+    "変わる": 350,
+    "続く": 395,
+    "落ちる": 590,
+    "置く": 370,
+    "信じる": 450,
+    "濡らす": 2800,
+    "言う": 10,
+    "机": 1290,
+    "場所": 315,
+    "一冊": 2600,
+    "夜": 205,
+    "朝": 345,
+    "空": 520,
+    "風": 550,
+    "雨": 740,
+    "街": 680,
+    "道": 305,
+    "足": 265,
+    "ページ": 1520,
+    "コーヒー": 1380,
 }
 
 
+def get_word_frequency_rank(lemma: str) -> int:
+    return CORE_FREQUENCY_RANKS.get(lemma, 15000)
+
+
 def katakana_to_hiragana(text: str) -> str:
-    """Convertit les katakana en hiragana tout en préservant les autres caractères (ex: ー)."""
     out = []
     for ch in text:
         code = ord(ch)
@@ -207,7 +301,6 @@ def katakana_to_hiragana(text: str) -> str:
 
 
 def hiragana_to_katakana(text: str) -> str:
-    """Convertit les hiragana en katakana."""
     out = []
     for ch in text:
         code = ord(ch)
@@ -219,7 +312,6 @@ def hiragana_to_katakana(text: str) -> str:
 
 
 def is_japanese_word_char(ch: str) -> bool:
-    """Vérifie si un caractère est un Kanji, Hiragana, Katakana ou caractère d'itération."""
     if not ch:
         return False
     code = ord(ch)
@@ -238,12 +330,11 @@ def contains_japanese_chars(text: str) -> bool:
 
 def normalize_typography_and_spacing(text: str) -> str:
     """
-    Normalise les espacements typographiques japonais problématiques dans les EPUBs :
-    1. Supprime les caractères invisibles (zero-width spaces, BOM, soft-hyphens).
-    2. Fusionne les espacements d'emphase artificiels entre caractères japonais isolés
-       (ex: 'ま さ か' ou 'ぜ っ た い に' causés par certaines polices/mises en page)
-       tout en préservant l'alinéa de début de paragraphe ('　') et l'espace après '！' / '？'.
-    3. Normalise les retours à la ligne doux au milieu d'une phrase japonaise.
+    Normalizes Japanese typographic spacing quirks in EPUB/PDF text:
+    1. Strips zero-width characters, BOM, soft hyphens.
+    2. Collapses artificial emphasis spacing between isolated CJK/kana characters
+       (e.g. 'ぜ っ た い に') while preserving paragraph indents ('　') and spaces after '！'/'？'.
+    3. Joins soft line breaks inside paragraphs.
     """
     if not text:
         return ""
@@ -278,10 +369,10 @@ def normalize_typography_and_spacing(text: str) -> str:
 
 def split_japanese_sentences(paragraph_text: str) -> List[str]:
     """
-    Découpe un paragraphe en phrases japonaises exactes en tenant compte :
-    - Des guillemets japonais imbriqués (「...」, 『...』, （...）, 【...】)
-    - Des dialogues suivis d'une proposition narrative (ex: 「行くよ！」と彼は言った。 -> 1 seule phrase)
-    - Des espaces plein-chasse après '！' ou '？' (ex: まさか！　そんなはずはない。 -> 2 phrases)
+    Splits a paragraph into Japanese sentences while respecting:
+    - Nested quotes/brackets (「...」, 『...』, （...）, 【...】)
+    - Quoted dialogue followed by a quotative clause (e.g. 「行くよ！」と彼は言った。 -> 1 sentence)
+    - Full-width space after '！' or '？' outside quotes.
     """
     text = normalize_typography_and_spacing(paragraph_text)
     if not text.strip():
@@ -355,9 +446,8 @@ def split_japanese_sentences(paragraph_text: str) -> List[str]:
 
 class JapaneseNLPEngine:
     """
-    Moteur d'analyse morphologique basé sur SudachiPy (entraîné sur BCCWJ/UniDic)
-    avec agrégation intelligente des verbes/adjectifs conjugués, doublé d'un
-    segmenteur morphologique par dictionnaire + déconjugaison.
+    Morphological analyzer powered by SudachiPy (SplitMode.C) with deinflection
+    and compound verb/auxiliary aggregation, plus dictionary-driven fallback.
     """
 
     def __init__(self) -> None:
@@ -397,6 +487,7 @@ class JapaneseNLPEngine:
                         "sid": sentence_id,
                         "surface": surface,
                         "is_word": False,
+                        "is_content_word": False,
                     }
                 )
                 token_idx += 1
@@ -507,16 +598,17 @@ class JapaneseNLPEngine:
             else:
                 i += 1
 
-            pos_fr = POS_FR_MAP.get(pos0, pos0)
+            pos_en = POS_EN_MAP.get(pos0, pos0)
             if conjugation_parts and surface != base_form:
-                pos_detail = f"{pos_fr} (forme conjuguée de {base_form})"
+                pos_detail = f"{pos_en} (inflected from {base_form})"
             else:
-                pos_detail = pos_fr
+                pos_detail = pos_en
 
             base_hira = katakana_to_hiragana(base_reading_kata)
             base_kata = hiragana_to_katakana(base_reading_kata)
             surf_hira = katakana_to_hiragana(surface_reading_kata)
             surf_kata = hiragana_to_katakana(surface_reading_kata)
+            is_content = pos0 in CONTENT_POS_SET and base_form not in PARTICLES_SET
 
             grouped_tokens.append(
                 {
@@ -531,7 +623,9 @@ class JapaneseNLPEngine:
                     "surface_katakana": surf_kata,
                     "pos": pos0,
                     "pos_detail": pos_detail,
+                    "frequency_rank": get_word_frequency_rank(base_form),
                     "is_word": True,
+                    "is_content_word": is_content,
                 }
             )
             token_idx += 1
@@ -584,10 +678,6 @@ class JapaneseNLPEngine:
     def _dictionary_morphological_analyze(
         self, sentence_text: str, sentence_id: str
     ) -> Dict[str, Any]:
-        """
-        Segmenteur morphologique basé sur le dictionnaire JMdict + règles de déconjugaison
-        verbale/adjectivale japonaise (utilisé lorsque SudachiPy n'est pas compilé localement).
-        """
         lex = self._load_lexicon()
         tokens: List[Dict[str, Any]] = []
         n = len(sentence_text)
@@ -597,7 +687,6 @@ class JapaneseNLPEngine:
         while i < n:
             ch = sentence_text[i]
 
-            # 1. Ponctuation ou espaces
             if not is_japanese_word_char(ch):
                 j = i + 1
                 while j < n and not is_japanese_word_char(sentence_text[j]):
@@ -609,13 +698,13 @@ class JapaneseNLPEngine:
                         "sid": sentence_id,
                         "surface": surf,
                         "is_word": False,
+                        "is_content_word": False,
                     }
                 )
                 token_idx += 1
                 i = j
                 continue
 
-            # 2. Recherche du plus long mot ou forme conjuguée à partir de la position i
             matched_token = None
             max_len = min(12, n - i)
             for length in range(max_len, 0, -1):
@@ -623,22 +712,20 @@ class JapaneseNLPEngine:
                 if not all(is_japanese_word_char(c) for c in candidate):
                     continue
 
-                # a) Correspondance directe dans le lexique
                 if candidate in lex:
                     hira, pos = lex[candidate]
-                    pos_fr = POS_FR_MAP.get(pos, pos or "Mot")
-                    matched_token = (candidate, candidate, hira, pos, pos_fr, length)
+                    pos_en = POS_EN_MAP.get(pos, pos or "Word")
+                    matched_token = (candidate, candidate, hira, pos, pos_en, length)
                     break
 
-                # b) Correspondance par déconjugaison (verbes Godan/Ichidan & adjectifs)
                 for surf_suffix, dict_ending in DECONJUGATION_RULES:
                     if candidate.endswith(surf_suffix) and len(candidate) > len(surf_suffix):
                         stem = candidate[: -len(surf_suffix)]
                         base_candidate = stem + dict_ending
                         if base_candidate in lex:
                             hira, pos = lex[base_candidate]
-                            pos_fr = POS_FR_MAP.get(pos, "Verbe")
-                            pos_detail = f"{pos_fr} (forme conjuguée de {base_candidate})"
+                            pos_en = POS_EN_MAP.get(pos, "Verb")
+                            pos_detail = f"{pos_en} (inflected from {base_candidate})"
                             matched_token = (
                                 candidate,
                                 base_candidate,
@@ -654,6 +741,7 @@ class JapaneseNLPEngine:
             if matched_token:
                 surf, base, hira, pos, pos_detail, step = matched_token
                 kata = hiragana_to_katakana(hira)
+                is_content = (pos in CONTENT_POS_SET or not pos) and base not in PARTICLES_SET
                 tokens.append(
                     {
                         "wid": f"{sentence_id}_t{token_idx}",
@@ -667,35 +755,38 @@ class JapaneseNLPEngine:
                         "surface_katakana": kata,
                         "pos": pos,
                         "pos_detail": pos_detail,
+                        "frequency_rank": get_word_frequency_rank(base),
                         "is_word": True,
+                        "is_content_word": is_content,
                     }
                 )
                 token_idx += 1
                 i += step
                 continue
 
-            # 3. Séparation par classe de caractères (Kanji vs Katakana vs Hiragana/Particule)
             if 0x4E00 <= ord(ch) <= 0x9FFF or ch == "々":
                 j = i + 1
                 while j < n and (0x4E00 <= ord(sentence_text[j]) <= 0x9FFF or sentence_text[j] == "々"):
                     j += 1
                 surf = sentence_text[i:j]
-                pos_detail = "Nom"
+                pos_detail = "Noun"
+                is_content = True
             elif 0x30A0 <= ord(ch) <= 0x30FF:
                 j = i + 1
                 while j < n and (0x30A0 <= ord(sentence_text[j]) <= 0x30FF or sentence_text[j] == "ー"):
                     j += 1
                 surf = sentence_text[i:j]
-                pos_detail = "Nom (Katakana)"
+                pos_detail = "Noun (Katakana)"
+                is_content = True
             else:
-                # Séquence Hiragana (particule ou mot grammatical)
                 surf = ch
                 for p_len in (3, 2, 1):
                     if i + p_len <= n and sentence_text[i : i + p_len] in PARTICLES_SET:
                         surf = sentence_text[i : i + p_len]
                         break
                 j = i + len(surf)
-                pos_detail = "Particule" if surf in PARTICLES_SET else "Mot"
+                is_content = surf not in PARTICLES_SET and len(surf) > 1
+                pos_detail = "Particle" if surf in PARTICLES_SET else "Word"
 
             hira = katakana_to_hiragana(surf)
             kata = hiragana_to_katakana(surf)
@@ -712,7 +803,9 @@ class JapaneseNLPEngine:
                     "surface_katakana": kata,
                     "pos": pos_detail,
                     "pos_detail": pos_detail,
+                    "frequency_rank": get_word_frequency_rank(surf),
                     "is_word": True,
+                    "is_content_word": is_content,
                 }
             )
             token_idx += 1
@@ -725,9 +818,8 @@ def build_underlined_sentence_html(
     tokens: List[Dict[str, Any]], target_wid: str
 ) -> Tuple[str, str]:
     """
-    Construit la phrase complète pour la carte Anki en soulignant (<u>...</u>)
-    exactement l'occurrence du mot cliqué dans la phrase que l'utilisateur est en train de lire.
-    Retourne (sentence_html, sentence_plain).
+    Reconstructs the full context sentence with the target word underlined (<u>...</u>).
+    Returns (sentence_html, sentence_plain).
     """
     html_parts: List[str] = []
     plain_parts: List[str] = []
@@ -742,6 +834,98 @@ def build_underlined_sentence_html(
             html_parts.append(escaped)
 
     return "".join(html_parts), "".join(plain_parts)
+
+
+def find_i_plus_one_candidates(
+    sentences: List[Dict[str, Any]],
+    known_words: Set[str],
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """
+    Batch i+1 sentence mining engine:
+    1. Counts book-wide occurrences of every content lemma.
+    2. Filters sentences that have realistic length (8..90 chars) and contain
+       exactly 1 unknown content word (or ifknown_words is empty, surfaces top high-value
+       content words with 1 target per sentence).
+    3. Ranks candidates by frequency_rank and book_occurrences.
+    """
+    lemma_book_counts: Dict[str, int] = {}
+    for sent in sentences:
+        for tok in sent.get("tokens", []):
+            if tok.get("is_word") and tok.get("is_content_word", True):
+                base = tok.get("base") or tok.get("surface", "")
+                if base and base not in PARTICLES_SET:
+                    lemma_book_counts[base] = lemma_book_counts.get(base, 0) + 1
+
+    candidates_by_lemma: Dict[str, Dict[str, Any]] = {}
+    has_known_baseline = len(known_words) > 0
+
+    for sent in sentences:
+        text = sent.get("text", "").strip()
+        if len(text) < 6 or len(text) > 110:
+            continue
+
+        tokens = sent.get("tokens", [])
+        content_tokens = [
+            t
+            for t in tokens
+            if t.get("is_word")
+            and t.get("is_content_word", True)
+            and (t.get("base") or t.get("surface")) not in PARTICLES_SET
+        ]
+        if not content_tokens:
+            continue
+
+        unknown_tokens = [
+            t
+            for t in content_tokens
+            if (t.get("base") not in known_words and t.get("surface") not in known_words)
+        ]
+
+        # Strict i+1 when user has a known words baseline; otherwise pick best target word per sentence
+        if has_known_baseline:
+            if len(unknown_tokens) != 1:
+                continue
+            target_tokens = unknown_tokens
+        else:
+            target_tokens = sorted(
+                content_tokens, key=lambda t: get_word_frequency_rank(t.get("base", ""))
+            )[:1]
+
+        for target in target_tokens:
+            lemma = target.get("base") or target.get("surface", "")
+            if not lemma or len(lemma) == 1 and not (0x4E00 <= ord(lemma[0]) <= 0x9FFF):
+                continue
+            if lemma in candidates_by_lemma:
+                continue
+
+            s_html, s_plain = build_underlined_sentence_html(tokens, target["wid"])
+            freq_rank = get_word_frequency_rank(lemma)
+            book_count = lemma_book_counts.get(lemma, 1)
+
+            candidates_by_lemma[lemma] = {
+                "sid": sent["sid"],
+                "wid": target["wid"],
+                "section_index": sent.get("section_index", 0),
+                "section_title": sent.get("section_title", ""),
+                "surface": target["surface"],
+                "base": lemma,
+                "reading_hiragana": target.get("reading_hiragana", ""),
+                "reading_katakana": target.get("reading_katakana", ""),
+                "pos_detail": target.get("pos_detail", ""),
+                "frequency_rank": freq_rank,
+                "book_occurrences": book_count,
+                "is_strict_i_plus_one": len(unknown_tokens) == 1,
+                "sentence_html": s_html,
+                "sentence_plain": s_plain,
+                "sentence_tokens": tokens,
+            }
+
+    ranked = sorted(
+        candidates_by_lemma.values(),
+        key=lambda c: (c["frequency_rank"], -c["book_occurrences"]),
+    )
+    return ranked[:limit]
 
 
 nlp_engine = JapaneseNLPEngine()

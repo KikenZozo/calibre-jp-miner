@@ -3,25 +3,25 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: yomicalibre
     restart: unless-stopped
+    networks:
+      - dokploy-network
     expose:
       - "8085"
-    ports:
-      - "${PORT:-8085}:8085"
-    environment:
-      - PORT=8085
-      - DATA_DIR=/data
-      - CALIBRE_LIBRARY_PATH=/calibre_library
-      - ANKI_DECK_NAME=${ANKI_DECK_NAME:-Data Mining}
-      - AUTO_MINE_ON_CLICK=${AUTO_MINE_ON_CLICK:-true}
-      - AUTO_DOWNLOAD_JMDICT=${AUTO_DOWNLOAD_JMDICT:-true}
-      - ANKICONNECT_URL=${ANKICONNECT_URL:-http://127.0.0.1:8765}
+    environment: ["PUID=1000", "PGID=1000", "PORT=8085", "DATA_DIR=/data", "CALIBRE_LIBRARY_PATH=/calibre-library", "ANKI_COLLECTION_PATH=/anki_data/enzo/collection.anki2", "ANKI_DECK_NAME=${ANKI_DECK_NAME:-Data Mining}", "AUTO_MINE_ON_CLICK=${AUTO_MINE_ON_CLICK:-true}", "AUTO_DOWNLOAD_JMDICT=${AUTO_DOWNLOAD_JMDICT:-true}", "MINING_AUTH_USER=${MINING_AUTH_USER:-}", "MINING_AUTH_PASSWORD=${MINING_AUTH_PASSWORD:-}"]
     volumes:
-      # Volume persistant géré par Docker/Dokploy (base SQLite, progression, cartes Anki, JMdict)
-      - yomicalibre-data:/data
-      # Chemin sur votre serveur vers le dossier de votre bibliothèque Calibre existante
-      # (Remplacez /chemin/sur/serveur/calibre dans Dokploy ou via la variable CALIBRE_HOST_PATH)
-      - ${CALIBRE_HOST_PATH:-./calibre_books}:/calibre_library:ro
+      - /home/enzo/mining:/data
+      - /home/enzo/calibre/library:/calibre-library:ro
+      - /home/enzo/calibre/gdrive:/home/enzo/calibre/gdrive:rslave
+      - /anki_data:/anki_data:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=dokploy-network"
+      - "traefik.http.routers.yomicalibre.rule=Host(`${MINING_DOMAIN:-mining.enzoprojects.net}`)"
+      - "traefik.http.routers.yomicalibre.entrypoints=web"
+      - "traefik.http.services.yomicalibre.loadbalancer.server.port=8085"
 
-volumes:
-  yomicalibre-data:
+networks:
+  dokploy-network:
+    external: true

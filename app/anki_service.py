@@ -1,9 +1,7 @@
-import asyncio
 import hashlib
 import json
 import socket
 import sqlite3
-import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -20,13 +18,13 @@ except ImportError:
 
 from app.config import DATA_DIR
 from app.database import (
+    compute_deterministic_guid,
     get_settings,
     insert_mined_card,
     list_mined_cards,
     mark_card_synced,
 )
 
-# Template HTML/CSS de la carte Anki pour le deck Data Mining
 CARD_CSS = """
 .card {
     font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", "Meiryo", sans-serif;
@@ -127,21 +125,27 @@ BACK_TEMPLATE = """
     {{#Grammaire}}<div class="pos-tag">{{Grammaire}}</div>{{/Grammaire}}
 </div>
 <div class="defs-box">
-    {{#Definition_FR}}<div class="def-fr">🇫🇷 {{Definition_FR}}</div>{{/Definition_FR}}
-    {{#Definition_EN}}<div class="def-en">🇬🇧 {{Definition_EN}}</div>{{/Definition_EN}}
+    {{#Definition_FR}}<div class="def-fr">{{Definition_FR}}</div>{{/Definition_FR}}
+    {{#Definition_EN}}<div class="def-en">{{Definition_EN}}</div>{{/Definition_EN}}
 </div>
-{{#Source}}<div class="source-footer">📖 {{Source}}</div>{{/Source}}
+{{#Source}}<div class="source-footer">{{Source}}</div>{{/Source}}
 """
 
 
-def build_anki_fields_for_card(card: Dict[str, Any]) -> Dict[str, str]:
-    """Construit le dictionnaire exact des champs Anki pour une carte minée."""
+def build_anki_fields_for_card(
+    card: Dict[str, Any], custom_field_map: Optional[Dict[str, str]] = None
+) -> Dict[str, str]:
+    """
+    Maps a mined card to Anki note fields.
+    Supports both the default YomiCalibre Mining note type and user-configured
+    mappings for existing Anki note types.
+    """
     word_base = card["word_base"]
     word_surface = card["word_surface"]
     mot_display = (
         word_base
         if word_base == word_surface
-        else f"{word_base} <span style='font-size:0.6em;color:#94a3b8;'>({word_surface})</span>"
+        else f"{word_base} ({word_surface})"
     )
 
     defs_fr = card.get("definitions_fr") or []
@@ -149,12 +153,13 @@ def build_anki_fields_for_card(card: Dict[str, Any]) -> Dict[str, str]:
 
     fr_str = " ; ".join(defs_fr) if defs_fr else ""
     en_str = " ; ".join(defs_en) if defs_en else ""
+    combined_def = " / ".join(filter(None, [fr_str, en_str]))
 
     source_parts = [p for p in (card.get("book_title"), card.get("chapter_title")) if p]
     source_str = " — ".join(source_parts)
 
-    return {
-        "Mot": mot_display,
+    default_fields = {
+        "Mot": word_base,
         "Lecture_Hiragana": card["reading_hiragana"],
         "Lecture_Katakana": card["reading_katakana"],
         "Grammaire": card.get("pos_detail", ""),
@@ -163,6 +168,29 @@ def build_anki_fields_for_card(card: Dict[str, Any]) -> Dict[str, str]:
         "Phrase_Contexte": card["sentence_html"],
         "Source": source_str,
     }
+
+    if not custom_field_map:
+        return default_fields
+
+    mapped: Dict[str, str] = {}
+    value_lookup = {
+        "word": word_base,
+        "word_surface": mot_display,
+        "reading_hiragana": card["reading_hiragana"],
+        "reading_katakana": card["reading_katakana"],
+        "pos": card.get("pos_detail", ""),
+        "definition_fr": fr_str,
+        "definition_en": en_str,
+        "definition": combined_def,
+        "sentence": card["sentence_html"],
+        "sentence_plain": card["sentence_plain"],
+        "source": source_str,
+    }
+    for semantic_key, target_anki_field in custom_field_map.items():
+        if target_anki_field and semantic_key in value_lookup:
+            mapped[target_anki_field] = value_lookup[semantic_key]
+
+    return mapped if mapped else default_fields
 
 
 def create_and_push_anki_card(
@@ -178,18 +206,18 @@ def create_and_push_anki_card(
     book_id: str = "",
     book_title: str = "",
     chapter_title: str = "",
+    frequency_rank: int = 999999,
     attempt_ankiconnect: bool = True,
 ) -> Dict[str, Any]:
     """
-    1. Enregistre la carte dans la base locale (avec la phrase contexte et le mot souligné <u>...</u>).
-    2. Tente de l'envoyer immédiatement à AnkiConnect si accessible depuis le serveur.
-    3. Sinon, la garde en file d'attente pour synchronisation automatique dès qu'Anki est ouvert
-       (depuis le navigateur PC ou via export .apkg).
+    Persists a mined card in mining.db with a deterministic GUID and optionally
+    pushes it to AnkiConnect if reachable.
     """
     settings = get_settings()
     deck_name = settings.get("anki_deck_name", "Data Mining")
     model_name = settings.get("anki_model_name", "YomiCalibre Mining")
     ankiconnect_url = settings.get("ankiconnect_url", "http://127.0.0.1:8765")
+    field_map = settings.get("anki_field_map")
 
     card = insert_mined_card(
         word_surface=word_surface,
@@ -205,30 +233,29 @@ def create_and_push_anki_card(
         book_title=book_title,
         chapter_title=chapter_title,
         deck_name=deck_name,
+        frequency_rank=frequency_rank,
         anki_synced=0,
     )
 
     if card.get("already_existed") and card.get("anki_synced"):
-        card["anki_fields"] = build_anki_fields_for_card(card)
-        card["sync_message"] = "Déjà présent dans le deck Anki"
+        card["anki_fields"] = build_anki_fields_for_card(card, field_map)
+        card["sync_message"] = "Already synced to Anki"
         return card
 
     note_id = None
     if attempt_ankiconnect:
         note_id = try_push_card_to_ankiconnect(
-            card, deck_name, model_name, ankiconnect_url
+            card, deck_name, model_name, ankiconnect_url, field_map
         )
     if note_id:
         mark_card_synced(card["id"], note_id)
         card["anki_synced"] = True
         card["anki_note_id"] = note_id
-        card["sync_message"] = f"Ajouté au deck « {deck_name} »"
+        card["sync_message"] = f"Added to Anki deck '{deck_name}'"
     else:
-        card["sync_message"] = (
-            f"Enregistré dans la file « {deck_name} » (sera synchronisé vers Anki automatiquement)"
-        )
+        card["sync_message"] = f"Queued for deck '{deck_name}'"
 
-    card["anki_fields"] = build_anki_fields_for_card(card)
+    card["anki_fields"] = build_anki_fields_for_card(card, field_map)
     card["anki_model_spec"] = get_ankiconnect_model_spec(model_name)
     return card
 
@@ -259,7 +286,6 @@ def get_ankiconnect_model_spec(model_name: str) -> Dict[str, Any]:
 
 
 def _is_ankiconnect_reachable(url: str) -> bool:
-    """Vérifie en < 80ms si le port TCP d'AnkiConnect est ouvert avant d'envoyer une requête HTTP."""
     try:
         parsed = urllib.parse.urlparse(url)
         host = parsed.hostname or "127.0.0.1"
@@ -287,8 +313,8 @@ def try_push_card_to_ankiconnect(
     deck_name: str,
     model_name: str,
     ankiconnect_url: str,
+    field_map: Optional[Dict[str, str]] = None,
 ) -> Optional[int]:
-    """Tente de créer le deck, le modèle et la note via AnkiConnect HTTP."""
     if not ankiconnect_url or not _is_ankiconnect_reachable(ankiconnect_url):
         return None
 
@@ -311,7 +337,7 @@ def try_push_card_to_ankiconnect(
                 },
             )
 
-        fields = build_anki_fields_for_card(card)
+        fields = build_anki_fields_for_card(card, field_map)
         note_payload = {
             "action": "addNote",
             "version": 6,
@@ -334,14 +360,12 @@ def try_push_card_to_ankiconnect(
 
 
 def export_cards_to_apkg(only_unsynced: bool = False) -> Path:
-    """
-    Génère un paquet natif Anki (.apkg) contenant toutes les cartes minées (avec la phrase
-    et le mot souligné <u>...</u>), prêt à être importé sur Anki Mobile, AnkiDroid ou Anki PC.
-    """
+    """Generates a deterministic-GUID Anki .apkg file using genanki (or stdlib fallback)."""
     settings = get_settings()
     deck_name = settings.get("anki_deck_name", "Data Mining")
     model_name = settings.get("anki_model_name", "YomiCalibre Mining")
     cards = list_mined_cards(only_unsynced=only_unsynced, limit=5000)
+
     exports_dir = DATA_DIR / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
     tmp_file = exports_dir / "data_mining_japanese.apkg"
@@ -374,6 +398,9 @@ def export_cards_to_apkg(only_unsynced: bool = False) -> Path:
         anki_deck = genanki.Deck(deck_id, deck_name)
         for c in reversed(cards):
             f = build_anki_fields_for_card(c)
+            det_guid = c.get("guid") or compute_deterministic_guid(
+                c["word_base"], c["sentence_plain"]
+            )
             note = genanki.Note(
                 model=anki_model,
                 fields=[
@@ -386,14 +413,42 @@ def export_cards_to_apkg(only_unsynced: bool = False) -> Path:
                     f["Phrase_Contexte"],
                     f["Source"],
                 ],
+                guid=det_guid,
                 tags=["yomicalibre", "japanese-mining"],
             )
             anki_deck.add_note(note)
         genanki.Package(anki_deck).write_to_file(str(tmp_file))
         return tmp_file
 
-    # Générateur .apkg autonome (SQLite collection.anki2 + media) si genanki n'est pas installé
     return _build_apkg_stdlib(cards, deck_name, model_name, tmp_file)
+
+
+def export_cards_to_tsv(only_unsynced: bool = False) -> Path:
+    """Exports mined cards to a deterministic TSV file for manual Anki import."""
+    cards = list_mined_cards(only_unsynced=only_unsynced, limit=5000)
+    exports_dir = DATA_DIR / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    tsv_path = exports_dir / "data_mining_japanese.tsv"
+
+    lines: List[str] = []
+    for c in reversed(cards):
+        f = build_anki_fields_for_card(c)
+        cols = [
+            c.get("guid", ""),
+            f["Mot"],
+            f["Lecture_Hiragana"],
+            f["Lecture_Katakana"],
+            f["Grammaire"],
+            f["Definition_FR"],
+            f["Definition_EN"],
+            f["Phrase_Contexte"],
+            f["Source"],
+        ]
+        cleaned_cols = [col.replace("\t", " ").replace("\n", " ") for col in cols]
+        lines.append("\t".join(cleaned_cols))
+
+    tsv_path.write_text("\n".join(lines), encoding="utf-8")
+    return tsv_path
 
 
 def _build_apkg_stdlib(
@@ -491,12 +546,32 @@ def _build_apkg_stdlib(
         }
     }
     decks = {
-        "1": {"id": 1, "mod": now_sec, "name": "Default", "usn": -1, "collapsed": False, "desc": ""},
-        deck_id: {"id": int(deck_id), "mod": now_sec, "name": deck_name, "usn": -1, "collapsed": False, "desc": ""},
+        "1": {
+            "id": 1,
+            "mod": now_sec,
+            "name": "Default",
+            "usn": -1,
+            "collapsed": False,
+            "desc": "",
+        },
+        deck_id: {
+            "id": int(deck_id),
+            "mod": now_sec,
+            "name": deck_name,
+            "usn": -1,
+            "collapsed": False,
+            "desc": "",
+        },
     }
     cur.execute(
         "INSERT INTO col VALUES (1, ?, ?, ?, 11, 0, 0, 0, '{}', ?, ?, '{}', '{}')",
-        (now_sec, now_sec * 1000, now_sec * 1000, json.dumps(models), json.dumps(decks)),
+        (
+            now_sec,
+            now_sec * 1000,
+            now_sec * 1000,
+            json.dumps(models),
+            json.dumps(decks),
+        ),
     )
 
     base_ts = int(time.time() * 1000)
@@ -505,7 +580,9 @@ def _build_apkg_stdlib(
         flds_str = "\x1f".join(f[fn] for fn in field_names)
         nid = base_ts + idx * 2
         cid = base_ts + idx * 2 + 1
-        guid = hashlib.sha1(f"{c['word_base']}_{c['sentence_plain']}".encode("utf-8")).hexdigest()[:10]
+        guid = c.get("guid") or compute_deterministic_guid(
+            c["word_base"], c["sentence_plain"]
+        )
         cur.execute(
             "INSERT INTO notes VALUES (?, ?, ?, ?, -1, ' yomicalibre ', ?, ?, 0, 0, '')",
             (nid, guid, int(model_id), now_sec, flds_str, f["Mot"]),

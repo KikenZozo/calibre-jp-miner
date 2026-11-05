@@ -1,10 +1,7 @@
 """
-Génère un livre EPUB japonais de démonstration dans le dossier Calibre
-pour tester immédiatement :
-- Le nettoyage des balises <ruby>/<rt> et le mélange des polices (<span class="gothic">, <b>)
-- La normalisation des espacements (alinéas '　', espaces après '！', emphase espacée 'ぜ っ た い')
-- La détection précise des phrases et des verbes conjugués
-- Le minage automatique vers Anki avec soulignement (<u>mot</u>) dans la phrase de contexte.
+Generates a sample Japanese EPUB in the local UPLOADS_DIR (never in CALIBRE_LIBRARY_PATH)
+for unit testing <ruby>/<rt> stripping, inline font merging, spacing normalization,
+and i+1 sentence mining.
 """
 
 import zipfile
@@ -15,7 +12,7 @@ from app.config import UPLOADS_DIR
 
 def create_sample_japanese_epub() -> Path:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    epub_path = UPLOADS_DIR / "La_Bibliotheque_Silencieuse.epub"
+    epub_path = UPLOADS_DIR / "Sample_Shizuka_na_Toshokan.epub"
 
     container_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -27,7 +24,7 @@ def create_sample_japanese_epub() -> Path:
     content_opf = """<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="2.0">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:title>静かな図書館の物語 (Récit de la Bibliothèque Silencieuse)</dc:title>
+    <dc:title>静かな図書館の物語</dc:title>
     <dc:creator>夏目 漱石・テスト文庫</dc:creator>
     <dc:language>ja</dc:language>
     <dc:identifier id="BookId">urn:uuid:yomicalibre-sample-001</dc:identifier>
@@ -100,4 +97,4 @@ def create_sample_japanese_epub() -> Path:
 
 if __name__ == "__main__":
     p = create_sample_japanese_epub()
-    print(f"EPUB d'exemple créé : {p}")
+    print(f"Sample EPUB created: {p}")

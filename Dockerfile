@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Dépendances système pour lxml, SudachiPy et healthcheck
+# Install system dependencies required for lxml, SudachiPy, and healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libxml2-dev \
@@ -15,10 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Variables d'environnement par défaut (personnalisables dans Dokploy -> Environment)
 ENV PORT=8085
+ENV PUID=1000
+ENV PGID=1000
 ENV DATA_DIR=/data
-ENV CALIBRE_LIBRARY_PATH=/calibre_library
+ENV CALIBRE_LIBRARY_PATH=/calibre-library
+ENV ANKI_COLLECTION_PATH=/anki_data/enzo/collection.anki2
 ENV ANKI_DECK_NAME="Data Mining"
 ENV AUTO_MINE_ON_CLICK="true"
 ENV AUTO_DOWNLOAD_JMDICT="true"

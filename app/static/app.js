@@ -95,11 +95,14 @@ function updateDictStatsLabel(stats) {
   }
 }
 
-async function loadLibrary() {
+async function loadLibrary(query = "") {
   const grid = document.getElementById("books-grid");
-  grid.innerHTML = `<p class="subtitle">Chargement de la bibliothèque Calibre...</p>`;
+  grid.innerHTML = `<p class="subtitle">Lecture de l'index léger metadata.db (aucun téléchargement Drive)...</p>`;
   try {
-    const res = await fetch("/api/books");
+    const url = query
+      ? `/api/books?q=${encodeURIComponent(query)}`
+      : "/api/books";
+    const res = await fetch(url);
     const data = await res.json();
     state.books = data.books || [];
     renderLibraryGrid();
@@ -657,6 +660,18 @@ function bindUIEvents() {
     }
     e.target.value = "";
   });
+
+  // Recherche SQL instantanée dans metadata.db (sans toucher aux fichiers EPUB sur le Drive)
+  const searchInp = document.getElementById("inp-search-books");
+  if (searchInp) {
+    let searchTimer = null;
+    searchInp.addEventListener("input", (e) => {
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => {
+        loadLibrary(e.target.value.trim());
+      }, 250);
+    });
+  }
 
   // Modale Deck Anki Data Mining
   document.getElementById("btn-open-mining-modal").addEventListener("click", async () => {

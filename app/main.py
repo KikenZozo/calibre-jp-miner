@@ -16,7 +16,7 @@ from app.anki_service import (
     get_ankiconnect_model_spec,
     try_push_card_to_ankiconnect,
 )
-from app.calibre_library import get_book_by_id, list_all_books
+from app.calibre_library import list_all_books, resolve_active_book_epub
 from app.config import UPLOADS_DIR
 from app.database import (
     delete_mined_card,
@@ -116,8 +116,8 @@ class MarkSyncedRequest(BaseModel):
 
 
 @app.get("/api/books")
-def api_list_books() -> Dict[str, Any]:
-    books = list_all_books()
+def api_list_books(q: str = "", limit: int = 50) -> Dict[str, Any]:
+    books = list_all_books(search_query=q, limit=limit)
     return {
         "books": books,
         "total": len(books),
@@ -136,20 +136,9 @@ async def api_upload_epub(file: UploadFile = File(...)) -> Dict[str, Any]:
     return {"status": "ok", "filename": safe_name, "books": books}
 
 
-@app.get("/api/books/{book_id}/cover")
-def api_book_cover(book_id: str):
-    book = get_book_by_id(book_id)
-    if not book or not book.get("cover_path"):
-        raise HTTPException(status_code=404, detail="Couverture absente")
-    cover_path = Path(book["cover_path"])
-    if not cover_path.exists():
-        raise HTTPException(status_code=404, detail="Fichier couverture introuvable")
-    return FileResponse(str(cover_path))
-
-
 @app.get("/api/books/{book_id}/chapter/{chapter_index}")
 def api_get_chapter(book_id: str, chapter_index: int) -> Dict[str, Any]:
-    book = get_book_by_id(book_id)
+    book = resolve_active_book_epub(book_id)
     if not book:
         raise HTTPException(status_code=404, detail="Livre introuvable dans la bibliothèque.")
     epub_path = Path(book["epub_path"])

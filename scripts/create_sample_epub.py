@@ -10,13 +10,12 @@ pour tester immédiatement :
 import zipfile
 from pathlib import Path
 
-from app.config import CALIBRE_LIBRARY_PATH
+from app.config import UPLOADS_DIR
 
 
 def create_sample_japanese_epub() -> Path:
-    book_dir = CALIBRE_LIBRARY_PATH / "Aozora Bunko" / "La Bibliotheque Silencieuse (1)"
-    book_dir.mkdir(parents=True, exist_ok=True)
-    epub_path = book_dir / "La_Bibliotheque_Silencieuse.epub"
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    epub_path = UPLOADS_DIR / "La_Bibliotheque_Silencieuse.epub"
 
     container_xml = """<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">

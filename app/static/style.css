@@ -229,6 +229,23 @@ body {
   margin-top: 3px;
 }
 
+.library-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.search-input {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  min-width: 240px;
+}
+
 .books-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));

@@ -50,16 +50,17 @@
 
     <!-- Zone principale (Bibliothèque OU Lecteur) -->
     <main id="main-workspace">
-      <!-- VUE 1 : Bibliothèque Calibre -->
+      <!-- VUE 1 : Bibliothèque Calibre (Mode Live 0-Scan pour rclone/Google Drive VFS) -->
       <section id="view-library" class="view-section">
         <div class="library-header">
           <div>
-            <h1>Bibliothèque Japonaise</h1>
-            <p class="subtitle">Connecté à votre serveur Calibre · Cliquez sur un livre pour lire et miner</p>
+            <h1>Bibliothèque Japonaise (Mode Live)</h1>
+            <p class="subtitle">Zéro scan de la bibliothèque · Seul le livre que vous ouvrez est chargé (protège votre cache VFS 5 Go)</p>
           </div>
           <div class="library-actions">
+            <input type="search" id="inp-search-books" class="search-input" placeholder="🔍 Rechercher un titre dans metadata.db..." />
             <label for="file-upload-epub" class="btn-primary">
-              ➕ Importer un .epub
+              ➕ Ouvrir un .epub direct
             </label>
             <input type="file" id="file-upload-epub" accept=".epub" class="hidden" />
           </div>

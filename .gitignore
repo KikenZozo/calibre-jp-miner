@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+data/
+calibre_books/
+*.apkg
+*.db
+.DS_Store

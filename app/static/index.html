@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>YomiCalibre — Lecteur & Mineur Japonais</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="app-shell">
+    <!-- Barre supérieure minimaliste -->
+    <header id="top-bar">
+      <div class="top-left">
+        <button id="btn-back-library" class="icon-btn hidden" title="Retour à la bibliothèque Calibre">
+          ← Bibliothèque
+        </button>
+        <span id="app-brand">📚 YomiCalibre</span>
+        <span id="current-book-label" class="book-breadcrumb hidden"></span>
+      </div>
+
+      <div class="top-right">
+        <!-- Sélecteur de chapitre (visible uniquement en lecture) -->
+        <div id="chapter-nav-controls" class="chapter-controls hidden">
+          <button id="btn-prev-chap" class="nav-pill" title="Chapitre précédent">‹</button>
+          <select id="select-chapter" aria-label="Chapitre"></select>
+          <button id="btn-next-chap" class="nav-pill" title="Chapitre suivant">›</button>
+        </div>
+
+        <!-- Toggle Minage Auto au clic -->
+        <label class="auto-mine-toggle" title="Créer automatiquement une carte Anki dès qu'on clique sur un mot">
+          <input type="checkbox" id="chk-auto-mine" checked />
+          <span class="toggle-pill">⚡ Auto-Anki</span>
+        </label>
+
+        <!-- Bouton File Anki Data Mining -->
+        <button id="btn-open-mining-modal" class="icon-btn badge-btn" title="Voir les cartes Anki Data Mining">
+          🗂️ <span class="hide-xs">Anki</span>
+          <span id="unsynced-badge" class="badge hidden">0</span>
+        </button>
+
+        <!-- Bouton Réglages (Police / Thème / Config Anki) -->
+        <button id="btn-open-settings" class="icon-btn" title="Réglages d'affichage et Anki">
+          ⚙️
+        </button>
+      </div>
+    </header>
+
+    <!-- Zone principale (Bibliothèque OU Lecteur) -->
+    <main id="main-workspace">
+      <!-- VUE 1 : Bibliothèque Calibre -->
+      <section id="view-library" class="view-section">
+        <div class="library-header">
+          <div>
+            <h1>Bibliothèque Japonaise</h1>
+            <p class="subtitle">Connecté à votre serveur Calibre · Cliquez sur un livre pour lire et miner</p>
+          </div>
+          <div class="library-actions">
+            <label for="file-upload-epub" class="btn-primary">
+              ➕ Importer un .epub
+            </label>
+            <input type="file" id="file-upload-epub" accept=".epub" class="hidden" />
+          </div>
+        </div>
+
+        <div id="books-grid" class="books-grid">
+          <!-- Injecté par app.js -->
+        </div>
+      </section>
+
+      <!-- VUE 2 : Lecteur EPUB avec mots pré-découpés (aucun élément flottant) -->
+      <section id="view-reader" class="view-section hidden">
+        <!-- Zone de lecture scrollable (prend 100% de la hauteur tant qu'aucun mot n'est cliqué) -->
+        <div id="reader-viewport">
+          <article id="reader-content" class="reader-article">
+            <!-- Paragraphes et mots pré-découpés injectés ici -->
+          </article>
+
+          <div class="chapter-footer-nav">
+            <button id="btn-footer-prev" class="btn-secondary">← Chapitre précédent</button>
+            <button id="btn-footer-next" class="btn-primary">Chapitre suivant →</button>
+          </div>
+        </div>
+
+        <!-- PANNEAU FIXE INTÉGRÉ EN BAS (Fait partie du flux Flexbox : ne survole JAMAIS le texte, invisible tant qu'on ne clique pas sur un mot) -->
+        <aside id="bottom-inspector-dock" class="inspector-dock hidden" aria-live="polite">
+          <div class="inspector-inner">
+            <div class="inspector-top-row">
+              <div class="word-identity">
+                <span id="insp-word-base" class="insp-kanji"></span>
+                <span id="insp-word-surface" class="insp-surface hidden"></span>
+                <span id="insp-pos" class="insp-pos-badge"></span>
+              </div>
+
+              <div class="inspector-readings">
+                <span class="reading-chip" title="Lecture en Hiragana">
+                  <small>かな</small> <strong id="insp-hira"></strong>
+                </span>
+                <span class="reading-chip" title="Lecture en Katakana">
+                  <small>カナ</small> <strong id="insp-kata"></strong>
+                </span>
+              </div>
+
+              <div class="inspector-actions">
+                <span id="insp-anki-status" class="anki-status-pill"></span>
+                <button id="btn-manual-mine" class="btn-mine-now hidden">➕ Créer carte Anki</button>
+                <button id="btn-close-inspector" class="btn-close-dock" title="Masquer le panneau">✕</button>
+              </div>
+            </div>
+
+            <!-- Définitions Français + Anglais -->
+            <div id="insp-definitions" class="inspector-defs"></div>
+
+            <!-- Contexte de la phrase récupéré avec le mot souligné -->
+            <div class="inspector-sentence-box">
+              <span class="sentence-label">Phrase Anki :</span>
+              <span id="insp-sentence-html" class="sentence-preview"></span>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <!-- MODAL 1 : Deck Anki Data Mining & Synchronisation -->
+  <div id="modal-mining" class="modal-backdrop hidden">
+    <div class="modal-panel modal-large">
+      <div class="modal-header">
+        <h2>🗂️ Deck Anki : <span id="modal-deck-name">Data Mining</span></h2>
+        <button id="btn-close-mining-modal" class="btn-close-dock">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="anki-sync-bar">
+          <div class="sync-info">
+            <p id="anki-sync-summary">Cartes créées automatiquement avec contexte et mot souligné.</p>
+          </div>
+          <div class="sync-buttons">
+            <button id="btn-sync-ankiconnect" class="btn-primary">
+              🔄 Synchroniser vers AnkiConnect
+            </button>
+            <a id="link-export-apkg" href="/api/anki/export.apkg" class="btn-secondary" download="Data_Mining_Japonais.apkg">
+              📥 Télécharger le paquet .apkg
+            </a>
+          </div>
+        </div>
+
+        <div id="mined-cards-list" class="mined-cards-list">
+          <!-- Liste des cartes minées -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 2 : Réglages (Typographie, Thème, Configuration Anki & JMdict) -->
+  <div id="modal-settings" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2>⚙️ Réglages & Configuration</h2>
+        <button id="btn-close-settings" class="btn-close-dock">✕</button>
+      </div>
+      <div class="modal-body settings-form">
+        <div class="setting-group">
+          <label>Thème de lecture</label>
+          <div class="segmented-control">
+            <button type="button" data-theme-val="dark" class="seg-btn active">Sombre</button>
+            <button type="button" data-theme-val="sepia" class="seg-btn">Sépia</button>
+            <button type="button" data-theme-val="light" class="seg-btn">Clair</button>
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <label>Taille de police (<span id="lbl-font-size">20px</span>)</label>
+          <input type="range" id="rng-font-size" min="15" max="32" value="20" />
+        </div>
+
+        <div class="setting-group">
+          <label>Police japonaise du lecteur</label>
+          <select id="sel-font-family">
+            <option value="mincho">Mincho (Serif roman japonais)</option>
+            <option value="gothic">Gothic (Sans-serif net)</option>
+          </select>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="setting-group">
+          <label for="inp-deck-name">Nom du deck Anki de Data Mining</label>
+          <input type="text" id="inp-deck-name" value="Data Mining" placeholder="Data Mining" />
+        </div>
+
+        <div class="setting-group">
+          <label for="inp-ankiconnect-url">URL AnkiConnect (PC ou serveur)</label>
+          <input type="text" id="inp-ankiconnect-url" value="http://127.0.0.1:8765" placeholder="http://127.0.0.1:8765" />
+          <small class="hint">Le lecteur tente aussi automatiquement de joindre AnkiConnect localement depuis votre navigateur PC pour vider la file d'attente mobile.</small>
+        </div>
+
+        <div class="setting-group">
+          <label>Dictionnaire JMdict (Français + Anglais)</label>
+          <div class="dict-status-row">
+            <span id="dict-stats-label">Chargement...</span>
+            <button type="button" id="btn-build-jmdict" class="btn-secondary">
+              ⬇️ Télécharger JMdict complet (~200k mots)
+            </button>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" id="btn-save-settings" class="btn-primary">Enregistrer</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

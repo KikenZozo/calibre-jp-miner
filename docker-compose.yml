@@ -1,0 +1,27 @@
+services:
+  yomicalibre:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8085"
+    ports:
+      - "${PORT:-8085}:8085"
+    environment:
+      - PORT=8085
+      - DATA_DIR=/data
+      - CALIBRE_LIBRARY_PATH=/calibre_library
+      - ANKI_DECK_NAME=${ANKI_DECK_NAME:-Data Mining}
+      - AUTO_MINE_ON_CLICK=${AUTO_MINE_ON_CLICK:-true}
+      - AUTO_DOWNLOAD_JMDICT=${AUTO_DOWNLOAD_JMDICT:-true}
+      - ANKICONNECT_URL=${ANKICONNECT_URL:-http://127.0.0.1:8765}
+    volumes:
+      # Volume persistant géré par Docker/Dokploy (base SQLite, progression, cartes Anki, JMdict)
+      - yomicalibre-data:/data
+      # Chemin sur votre serveur vers le dossier de votre bibliothèque Calibre existante
+      # (Remplacez /chemin/sur/serveur/calibre dans Dokploy ou via la variable CALIBRE_HOST_PATH)
+      - ${CALIBRE_HOST_PATH:-./calibre_books}:/calibre_library:ro
+
+volumes:
+  yomicalibre-data:

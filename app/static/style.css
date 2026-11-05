@@ -77,11 +77,12 @@ body {
 }
 
 #top-bar {
-  flex: 0 0 50px;
+  flex: 0 0 auto;
+  min-height: 50px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px;
+  padding: 0 10px;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-color);
   gap: 8px;
@@ -92,8 +93,19 @@ body {
 .top-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
+}
+
+/* The left group may shrink (the breadcrumb ellipsises) so the controls on the
+   right always stay inside the viewport instead of overflowing off-screen. */
+.top-left {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.top-right {
+  flex: 0 0 auto;
 }
 
 #app-brand {
@@ -225,13 +237,17 @@ body {
 }
 
 /* Library View */
-#view-library,
 #view-candidates {
   overflow-y: auto;
   padding: 24px 18px 40px;
+}
+
+.library-scroll > *,
+#view-candidates > * {
   max-width: 1080px;
   width: 100%;
-  margin: 0 auto;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .library-header,
@@ -814,5 +830,312 @@ body {
   }
   .insp-kanji {
     font-size: 21px;
+  }
+}
+
+
+/* ---------------------------------------------------------------------------
+   Always-visible section / page toolbar
+   The previous build put the only section controls in the top bar (which
+   overflowed off-screen on a phone) and at the very bottom of the chapter text,
+   thousands of pixels down the scroll container. This toolbar is pinned.
+--------------------------------------------------------------------------- */
+.reader-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.reader-toolbar::-webkit-scrollbar {
+  display: none;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.toolbar-grow {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: center;
+}
+
+.toolbar-position,
+.toolbar-zoom {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.toolbar-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.toolbar-check input {
+  accent-color: var(--accent);
+}
+
+.toolbar-pagelabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.toolbar-pagelabel input {
+  width: 56px;
+  padding: 4px 6px;
+  text-align: center;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-ghost:hover {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.btn-ghost:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* --- Extraction progress --- */
+.extract-progress {
+  max-width: 720px;
+  margin: 24px auto;
+  padding: 18px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.extract-progress-label {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.extract-progress-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+
+.extract-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
+.extract-progress-detail {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+/* --- Library upload feedback --- */
+.library-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 18px 36px;
+}
+
+.upload-status,
+.library-error {
+  max-width: 1100px;
+  margin: 0 auto 14px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+
+.upload-status.is-error,
+.library-error {
+  border-color: #b91c1c;
+  color: #fca5a5;
+}
+
+.upload-status.is-ok {
+  border-color: transparent;
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+/* ---------------------------------------------------------------------------
+   Classic PDF view: the original page rendered by pdf.js with an invisible,
+   pre-segmented word layer on top (Yomitan-style word scanning).
+--------------------------------------------------------------------------- */
+.pdf-viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  background: var(--bg-main);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  -webkit-overflow-scrolling: touch;
+}
+
+.pdf-stage {
+  position: relative;
+  line-height: 0;
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.35);
+  background: #ffffff;
+}
+
+.pdf-stage canvas {
+  display: block;
+  max-width: none;
+}
+
+.pdf-word-layer {
+  position: absolute;
+  inset: 0;
+  line-height: normal;
+}
+
+.pdf-word {
+  position: absolute;
+  cursor: pointer;
+  border-radius: 2px;
+  background: transparent;
+  transition: background-color 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.pdf-word:hover {
+  background: var(--accent-soft);
+}
+
+.pdf-word.active-word {
+  background: rgba(99, 102, 241, 0.3);
+  outline: 2px solid var(--accent-light);
+}
+
+.pdf-word-layer.show-boxes .pdf-word {
+  outline: 1px solid rgba(99, 102, 241, 0.45);
+}
+
+.pdf-message {
+  margin: 24px auto;
+  max-width: 560px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.pdf-message.hidden {
+  display: none !important;
+}
+
+.pdf-message .btn-primary,
+.pdf-message .btn-secondary {
+  margin-top: 12px;
+}
+
+/* --- Empty / scanned-book notice inside the reflowed reader --- */
+.reader-notice {
+  max-width: 640px;
+  margin: 40px auto;
+  padding: 22px;
+  text-align: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.reader-notice h3 {
+  color: var(--text-primary);
+  margin-bottom: 10px;
+  font-size: 16px;
+}
+
+.reader-notice button {
+  margin-top: 14px;
+}
+
+.inline-check {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.inline-check input {
+  accent-color: var(--accent);
+}
+
+#pdf-source-badge {
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+@media (max-width: 720px) {
+  .hide-sm {
+    display: none;
+  }
+  /* Let the toolbar scroll horizontally rather than letting one long status
+     chip wrap and inflate the whole bar. */
+  .toolbar-grow {
+    flex: 0 0 auto;
+    justify-content: flex-start;
+  }
+  .toolbar-pagelabel input {
+    width: 46px;
+  }
+  .reader-toolbar {
+    padding: 6px 8px;
+    gap: 8px;
+  }
+  .library-scroll {
+    padding: 14px 12px 28px;
+  }
+  .pdf-viewport {
+    padding: 8px;
   }
 }

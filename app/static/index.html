@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <title>YomiCalibre — Japanese Reader & i+1 Miner</title>
+  <title>YomiCalibre — Japanese Reader &amp; i+1 Miner</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="stylesheet" href="/style.css" />
 </head>
@@ -15,42 +15,28 @@
     <header id="top-bar">
       <div class="top-left">
         <button id="btn-back-library" class="icon-btn hidden" title="Back to Calibre Library">
-          ← Library
+          ← <span class="hide-xs">Library</span>
         </button>
-        <span id="app-brand">📚 YomiCalibre</span>
+        <span id="app-brand">📚 <span class="hide-xs">YomiCalibre</span></span>
         <span id="current-book-label" class="book-breadcrumb hidden"></span>
       </div>
 
       <div class="top-right">
-        <!-- Mode Switcher (Interactive Reader vs Batch i+1 Miner) -->
+        <!-- Mode Switcher (PDF / Reader / Batch i+1 Miner) -->
         <div id="book-mode-tabs" class="segmented-inline hidden">
-          <button id="tab-mode-reader" class="mode-tab active">📖 Reader</button>
-          <button id="tab-mode-candidates" class="mode-tab">🎯 i+1 Batch</button>
+          <button id="tab-mode-pdf" class="mode-tab hidden" title="Original PDF with clickable words">📄 <span class="hide-xs">PDF</span></button>
+          <button id="tab-mode-reader" class="mode-tab active" title="Reflowed text reader">📖 <span class="hide-xs">Reader</span></button>
+          <button id="tab-mode-candidates" class="mode-tab" title="Batch i+1 sentence mining">🎯 <span class="hide-xs">i+1</span></button>
         </div>
-
-        <!-- Section Navigation (Reader Mode) -->
-        <div id="chapter-nav-controls" class="chapter-controls hidden">
-          <button id="btn-prev-chap" class="nav-pill" title="Previous Section">‹</button>
-          <select id="select-chapter" aria-label="Section"></select>
-          <button id="btn-next-chap" class="nav-pill" title="Next Section">›</button>
-        </div>
-
-        <!-- Auto-Mine on Click Toggle -->
-        <label class="auto-mine-toggle" title="Automatically create an Anki card when clicking a word">
-          <input type="checkbox" id="chk-auto-mine" checked />
-          <span class="toggle-pill">⚡ Auto-Anki</span>
-        </label>
 
         <!-- Anki Mining Queue Modal Trigger -->
         <button id="btn-open-mining-modal" class="icon-btn badge-btn" title="Anki Mining Queue & Known Words">
-          🗂️ <span class="hide-xs">Anki</span>
+          🗂️ <span class="hide-sm">Anki</span>
           <span id="unsynced-badge" class="badge hidden">0</span>
         </button>
 
         <!-- Settings Modal Trigger -->
-        <button id="btn-open-settings" class="icon-btn" title="Display & Anki Settings">
-          ⚙️
-        </button>
+        <button id="btn-open-settings" class="icon-btn" title="Display & Anki Settings">⚙️</button>
       </div>
     </header>
 
@@ -58,29 +44,95 @@
     <main id="main-workspace">
       <!-- VIEW 1: Zero-Scan Calibre Library Catalog -->
       <section id="view-library" class="view-section">
-        <div class="library-header">
-          <div>
-            <h1>Japanese Library (metadata.db Index)</h1>
-            <p class="subtitle">
-              Zero filesystem walk · Extracts once on demand and caches permanently by <code>books.uuid</code>
-              · Known words: <strong id="lbl-known-count">0</strong>
-            </p>
+        <div class="library-scroll">
+          <div class="library-header">
+            <div>
+              <h1>Japanese Library (metadata.db Index)</h1>
+              <p class="subtitle">
+                Zero filesystem walk · Extracts once on demand and caches permanently by <code>books.uuid</code>
+                · Known words: <strong id="lbl-known-count">0</strong>
+              </p>
+            </div>
+            <div class="library-actions">
+              <input type="search" id="inp-search-books" class="search-input" placeholder="🔍 Search title or author..." />
+              <label for="file-upload-epub" class="btn-primary" id="lbl-upload">
+                ➕ Upload .epub / .pdf
+              </label>
+              <input type="file" id="file-upload-epub" accept=".epub,.pdf,application/pdf,application/epub+zip" class="hidden" />
+            </div>
           </div>
-          <div class="library-actions">
-            <input type="search" id="inp-search-books" class="search-input" placeholder="🔍 Search title or author..." />
-            <label for="file-upload-epub" class="btn-primary">
-              ➕ Upload .epub / .pdf
+
+          <div id="upload-status" class="upload-status hidden"></div>
+          <div id="library-error" class="library-error hidden"></div>
+
+          <div id="books-grid" class="books-grid"></div>
+        </div>
+      </section>
+
+      <!-- VIEW 2: Original PDF rendering with a clickable word overlay -->
+      <section id="view-pdf" class="view-section hidden">
+        <div class="reader-toolbar" id="pdf-toolbar">
+          <div class="toolbar-group">
+            <button id="btn-pdf-prev" class="nav-pill" title="Previous page (←)">‹</button>
+            <span class="toolbar-pagelabel">
+              <input type="number" id="inp-pdf-page" min="1" value="1" aria-label="Page number" />
+              <span id="lbl-pdf-pagecount">/ 0</span>
+            </span>
+            <button id="btn-pdf-next" class="nav-pill" title="Next page (→)">›</button>
+          </div>
+
+          <div class="toolbar-group toolbar-grow">
+            <span id="pdf-source-badge" class="meta-chip">—</span>
+          </div>
+
+          <div class="toolbar-group">
+            <button id="btn-pdf-zoom-out" class="nav-pill" title="Zoom out">−</button>
+            <span id="lbl-pdf-zoom" class="toolbar-zoom">100%</span>
+            <button id="btn-pdf-zoom-in" class="nav-pill" title="Zoom in">+</button>
+            <button id="btn-pdf-fit" class="btn-ghost" title="Fit page width">⤢ Fit</button>
+            <button id="btn-pdf-ocr" class="btn-ghost" title="Force OCR on this page">🔍 OCR</button>
+            <button id="btn-pdf-analyze-all" class="btn-ghost" title="Index every page (OCR included) so batch i+1 mining sees the whole book">📚 Index all</button>
+            <label class="toolbar-check" title="Show the detected word boxes">
+              <input type="checkbox" id="chk-show-boxes" /> <span>Boxes</span>
             </label>
-            <input type="file" id="file-upload-epub" accept=".epub,.pdf" class="hidden" />
           </div>
         </div>
 
-        <div id="books-grid" class="books-grid"></div>
+        <div id="pdf-viewport" class="pdf-viewport">
+          <div id="pdf-stage" class="pdf-stage">
+            <canvas id="pdf-canvas"></canvas>
+            <div id="pdf-word-layer" class="pdf-word-layer"></div>
+          </div>
+          <p id="pdf-message" class="pdf-message">Loading PDF…</p>
+        </div>
       </section>
 
-      <!-- VIEW 2: Interactive Pre-Segmented Reader (Zero Floating Popups) -->
+      <!-- VIEW 3: Interactive Pre-Segmented Reader (Zero Floating Popups) -->
       <section id="view-reader" class="view-section hidden">
+        <!-- Always-visible section navigation: never buried at the bottom of the text -->
+        <div class="reader-toolbar" id="reader-toolbar">
+          <div class="toolbar-group">
+            <button id="btn-prev-chap" class="nav-pill" title="Previous section (←)">‹</button>
+            <select id="select-chapter" aria-label="Section"></select>
+            <button id="btn-next-chap" class="nav-pill" title="Next section (→)">›</button>
+          </div>
+          <div class="toolbar-group toolbar-grow">
+            <span id="lbl-section-position" class="toolbar-position"></span>
+          </div>
+          <div class="toolbar-group">
+            <label class="toolbar-check" title="Automatically create an Anki card when clicking a word">
+              <input type="checkbox" id="chk-auto-mine" checked /> <span>⚡ Auto-Anki</span>
+            </label>
+          </div>
+        </div>
+
         <div id="reader-viewport">
+          <div id="reader-progress" class="extract-progress hidden">
+            <div class="extract-progress-label" id="extract-progress-label">Extracting…</div>
+            <div class="extract-progress-track"><div class="extract-progress-bar" id="extract-progress-bar"></div></div>
+            <div class="extract-progress-detail" id="extract-progress-detail"></div>
+          </div>
+
           <article id="reader-content" class="reader-article"></article>
 
           <div class="chapter-footer-nav">
@@ -88,45 +140,9 @@
             <button id="btn-footer-next" class="btn-primary">Next Section →</button>
           </div>
         </div>
-
-        <!-- Fixed Integrated Bottom Dock (part of Flex layout, never floats over text) -->
-        <aside id="bottom-inspector-dock" class="inspector-dock hidden" aria-live="polite">
-          <div class="inspector-inner">
-            <div class="inspector-top-row">
-              <div class="word-identity">
-                <span id="insp-word-base" class="insp-kanji"></span>
-                <span id="insp-word-surface" class="insp-surface hidden"></span>
-                <span id="insp-pos" class="insp-pos-badge"></span>
-                <span id="insp-freq" class="insp-freq-badge"></span>
-              </div>
-
-              <div class="inspector-readings">
-                <span class="reading-chip" title="Hiragana Reading">
-                  <small>平仮名</small> <strong id="insp-hira"></strong>
-                </span>
-                <span class="reading-chip" title="Katakana Reading">
-                  <small>片仮名</small> <strong id="insp-kata"></strong>
-                </span>
-              </div>
-
-              <div class="inspector-actions">
-                <span id="insp-anki-status" class="anki-status-pill"></span>
-                <button id="btn-manual-mine" class="btn-mine-now hidden">➕ Mine to Anki</button>
-                <button id="btn-close-inspector" class="btn-close-dock" title="Close Panel">✕</button>
-              </div>
-            </div>
-
-            <div id="insp-definitions" class="inspector-defs"></div>
-
-            <div class="inspector-sentence-box">
-              <span class="sentence-label">Context :</span>
-              <span id="insp-sentence-html" class="sentence-preview"></span>
-            </div>
-          </div>
-        </aside>
       </section>
 
-      <!-- VIEW 3: Batch i+1 Sentence Miner -->
+      <!-- VIEW 4: Batch i+1 Sentence Miner -->
       <section id="view-candidates" class="view-section hidden">
         <div class="candidates-container">
           <div class="candidates-header">
@@ -146,6 +162,43 @@
           <div id="candidates-list" class="mined-cards-list"></div>
         </div>
       </section>
+
+      <!-- Fixed Integrated Bottom Dock, shared by the reader and the PDF view
+           (part of the Flex layout, never floats over the text) -->
+      <aside id="bottom-inspector-dock" class="inspector-dock hidden" aria-live="polite">
+        <div class="inspector-inner">
+          <div class="inspector-top-row">
+            <div class="word-identity">
+              <span id="insp-word-base" class="insp-kanji"></span>
+              <span id="insp-word-surface" class="insp-surface hidden"></span>
+              <span id="insp-pos" class="insp-pos-badge"></span>
+              <span id="insp-freq" class="insp-freq-badge"></span>
+            </div>
+
+            <div class="inspector-readings">
+              <span class="reading-chip" title="Hiragana Reading">
+                <small>平仮名</small> <strong id="insp-hira"></strong>
+              </span>
+              <span class="reading-chip" title="Katakana Reading">
+                <small>片仮名</small> <strong id="insp-kata"></strong>
+              </span>
+            </div>
+
+            <div class="inspector-actions">
+              <span id="insp-anki-status" class="anki-status-pill"></span>
+              <button id="btn-manual-mine" class="btn-mine-now hidden">➕ Mine to Anki</button>
+              <button id="btn-close-inspector" class="btn-close-dock" title="Close Panel">✕</button>
+            </div>
+          </div>
+
+          <div id="insp-definitions" class="inspector-defs"></div>
+
+          <div class="inspector-sentence-box">
+            <span class="sentence-label">Context :</span>
+            <span id="insp-sentence-html" class="sentence-preview"></span>
+          </div>
+        </div>
+      </aside>
     </main>
   </div>
 
@@ -164,18 +217,10 @@
             </p>
           </div>
           <div class="sync-buttons">
-            <button id="btn-sync-ankiconnect" class="btn-primary">
-              🔄 Push to AnkiConnect
-            </button>
-            <button id="btn-sync-anki-snapshot" class="btn-secondary">
-              🧠 Sync Known Words
-            </button>
-            <a id="link-export-apkg" href="/api/anki/export.apkg" class="btn-secondary" download="Data_Mining_Japanese.apkg">
-              📥 .apkg
-            </a>
-            <a id="link-export-tsv" href="/api/anki/export.tsv" class="btn-secondary" download="Data_Mining_Japanese.tsv">
-              📄 .tsv
-            </a>
+            <button id="btn-sync-ankiconnect" class="btn-primary">🔄 Push to AnkiConnect</button>
+            <button id="btn-sync-anki-snapshot" class="btn-secondary">🧠 Sync Known Words</button>
+            <a id="link-export-apkg" href="/api/anki/export.apkg" class="btn-secondary" download="Data_Mining_Japanese.apkg">📥 .apkg</a>
+            <a id="link-export-tsv" href="/api/anki/export.tsv" class="btn-secondary" download="Data_Mining_Japanese.tsv">📄 .tsv</a>
           </div>
         </div>
 
@@ -214,6 +259,13 @@
           </select>
         </div>
 
+        <div class="setting-group">
+          <label class="inline-check">
+            <input type="checkbox" id="chk-auto-mine-settings" checked />
+            <span>⚡ Auto-create an Anki card on every word click</span>
+          </label>
+        </div>
+
         <hr class="divider" />
 
         <div class="setting-group">
@@ -238,6 +290,13 @@
             <button type="button" id="btn-build-jmdict" class="btn-secondary">
               ⬇️ Build Full JMdict (~200k entries)
             </button>
+          </div>
+        </div>
+
+        <div class="setting-group">
+          <label>Scanned PDF OCR (Tesseract)</label>
+          <div class="dict-status-row">
+            <span id="ocr-stats-label">Checking…</span>
           </div>
         </div>
 

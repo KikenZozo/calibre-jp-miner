@@ -4,7 +4,7 @@ import threading
 import warnings
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 
 from bs4 import BeautifulSoup, NavigableString, Tag, XMLParsedAsHTMLWarning
@@ -53,43 +53,66 @@ def ensure_book_extracted_and_get_section(
     book_descriptor: Dict[str, Any], section_index: int = 0
 ) -> Dict[str, Any]:
     """
-    Ensures a book (EPUB or PDF) is extracted once and cached permanently in mining.db
-    keyed by book_uuid, then returns the requested section from the SQLite cache.
+    Returns the requested section from the permanent mining.db cache, extracting the
+    book first if needed. Kept for callers that can afford to block (tests, batch i+1).
     """
     book_uuid = book_descriptor["book_uuid"]
 
-    if is_book_extracted(book_uuid):
-        cached = get_cached_book_section(book_uuid, section_index)
-        if cached is not None:
-            return cached
+    cached = get_cached_book_section(book_uuid, section_index)
+    if cached is not None:
+        return cached
 
+    extract_book_into_cache(book_descriptor)
+
+    cached = get_cached_book_section(book_uuid, section_index)
+    if cached is None:
+        raise RuntimeError(f"Failed to load cached section for {book_uuid}")
+    return cached
+
+
+def extract_book_into_cache(
+    book_descriptor: Dict[str, Any], progress: Optional[Callable[..., None]] = None
+) -> None:
+    """
+    Extracts a book (EPUB or PDF) exactly once and caches it permanently in mining.db,
+    keyed by book_uuid. Extraction is serialised so a Google Drive symlink is never
+    opened by two requests at the same time.
+    """
+    book_uuid = book_descriptor["book_uuid"]
+    report = progress or (lambda *a, **k: None)
+
+    if is_book_extracted(book_uuid):
+        return
+
+    report("waiting", 0, 0, "Waiting for the extraction queue...")
     with _EXTRACTION_LOCK:
-        # Double-check after acquiring lock
+        # Another request may have finished the same book while we waited.
         if is_book_extracted(book_uuid):
-            cached = get_cached_book_section(book_uuid, section_index)
-            if cached is not None:
-                return cached
+            return
 
         file_path_str = book_descriptor["file_path"]
         file_path = Path(file_path_str)
-        # Re-check os.path.islink right before opening (offload cron runs every 10 min)
+        # Re-check os.path.islink right before opening (the offload cron runs every 10 min)
         is_symlink = os.path.islink(file_path_str)
-        fmt = book_descriptor.get("preferred_format", "EPUB").upper()
+        fmt = (book_descriptor.get("preferred_format") or "EPUB").upper()
 
         if not file_path.exists():
             raise FileNotFoundError(
                 f"Book file not found or Drive mount unavailable: {file_path_str}"
             )
 
+        report("opening", 0, 0, f"Opening {file_path.name}...")
+
         if fmt == "PDF" or file_path.suffix.lower() == ".pdf":
             has_text, sections, all_sentences = _extract_pdf_full(
-                file_path, book_uuid
+                file_path, book_uuid, progress=report
             )
         else:
             has_text, sections, all_sentences = _extract_epub_full(
-                file_path, book_uuid
+                file_path, book_uuid, progress=report
             )
 
+        report("saving", len(sections), max(1, len(sections)), "Saving to mining.db...")
         store_extracted_book(
             book_uuid=book_uuid,
             calibre_id=int(book_descriptor.get("calibre_id") or 0),
@@ -103,22 +126,25 @@ def ensure_book_extracted_and_get_section(
             sentences=all_sentences,
         )
 
-    cached = get_cached_book_section(book_uuid, section_index)
-    if cached is None:
-        raise RuntimeError(f"Failed to load cached section for {book_uuid}")
-    return cached
-
 
 def _extract_epub_full(
-    epub_path: Path, book_uuid: str
+    epub_path: Path, book_uuid: str, progress: Optional[Callable[..., None]] = None
 ) -> Tuple[bool, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    report = progress or (lambda *a, **k: None)
     meta = extract_epub_metadata_and_spine(epub_path)
     chapters = meta["chapters"]
     sections: List[Dict[str, Any]] = []
     all_sentences: List[Dict[str, Any]] = []
+    total_chapters = len(chapters)
 
     with zipfile.ZipFile(str(epub_path), "r") as zf:
         for sec_idx, chap_info in enumerate(chapters):
+            report(
+                "segmenting",
+                sec_idx,
+                total_chapters,
+                f"Section {sec_idx + 1}/{total_chapters}: {chap_info['title']}",
+            )
             raw_bytes = zf.read(chap_info["href"])
             html_str = _decode_html_bytes(raw_bytes)
             raw_blocks = extract_normalized_blocks_from_html(html_str)
@@ -162,13 +188,18 @@ def _extract_epub_full(
 
 
 def _extract_pdf_full(
-    pdf_path: Path, book_uuid: str, pages_per_section: int = 10
+    pdf_path: Path,
+    book_uuid: str,
+    pages_per_section: int = 10,
+    progress: Optional[Callable[..., None]] = None,
 ) -> Tuple[bool, List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Extracts Japanese text from a PDF using PyMuPDF (fitz).
-    Always tests for an embedded text layer first; if the PDF is an image-only scan,
-    marks has_text_layer=False and returns a clear diagnostic section.
+    Always tests for an embedded text layer first; an image-only scan yields no
+    reflowed sections at all (has_text_layer=False) and is handled by the classic
+    PDF view with its on-demand OCR instead.
     """
+    report = progress or (lambda *a, **k: None)
     if not _PYMUPDF_AVAILABLE:
         raise RuntimeError("PyMuPDF (fitz) is required for PDF extraction.")
 
@@ -190,35 +221,21 @@ def _extract_pdf_full(
 
     if not has_text_layer:
         doc.close()
-        notice = (
-            "このPDFにはテキストレイヤーが含まれていません（画像スキャンPDF）。"
-            "OCR処理が必要です。"
-        )
-        sid = f"{book_uuid}:s0:n0"
-        analyzed = nlp_engine.analyze_sentence(notice, sid)
-        analyzed["section_index"] = 0
-        analyzed["sentence_index"] = 0
-        all_sentences.append(analyzed)
-        sections.append(
-            {
-                "section_index": 0,
-                "section_title": "PDF (Image Scan - No Text Layer)",
-                "blocks": [
-                    {
-                        "block_id": "b0",
-                        "type": "p",
-                        "style_class": "",
-                        "sentences": [analyzed],
-                    }
-                ],
-            }
-        )
-        return False, sections, all_sentences
+        # An image-only scan has nothing to reflow. Cache it as an empty, text-less
+        # book so the UI routes the reader straight to the classic PDF + OCR view
+        # instead of showing a placeholder paragraph as if it were the book.
+        return False, [], []
 
     # 2. Extract text layer grouped by section
     sec_idx = 0
     for start_page in range(0, total_pages, pages_per_section):
         end_page = min(total_pages, start_page + pages_per_section)
+        report(
+            "segmenting",
+            start_page,
+            total_pages,
+            f"Pages {start_page + 1}-{end_page} of {total_pages}",
+        )
         raw_blocks: List[Dict[str, str]] = []
 
         for p_num in range(start_page, end_page):

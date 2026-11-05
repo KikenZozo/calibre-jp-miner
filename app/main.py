@@ -11,6 +11,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from app import extraction_jobs
+from app import ocr as ocr_module
 from app.anki_service import (
     build_anki_fields_for_card,
     create_and_push_anki_card,
@@ -20,19 +22,28 @@ from app.anki_service import (
     try_push_card_to_ankiconnect,
 )
 from app.anki_snapshot import inspect_and_sync_anki_snapshot
-from app.calibre_library import get_book_descriptor, list_all_books
+from app.calibre_library import (
+    get_book_descriptor,
+    get_last_library_error,
+    list_all_books,
+    local_book_id_for,
+)
 from app.config import (
     MINING_AUTH_PASSWORD,
     MINING_AUTH_USER,
     UPLOADS_DIR,
 )
 from app.database import (
+    clear_pdf_page_layouts,
+    count_cached_pdf_pages,
     delete_mined_card,
     get_all_cached_sentences_for_book,
+    get_cached_book_section,
     get_known_words_count,
     get_known_words_set,
     get_settings,
     init_app_db,
+    is_book_extracted,
     list_mined_cards,
     mark_card_synced,
     save_reading_progress,
@@ -40,12 +51,12 @@ from app.database import (
     upsert_known_words,
 )
 from app.dictionary import get_dictionary_stats, init_jmdict_db, lookup_word
-from app.epub_parser import ensure_book_extracted_and_get_section
 from app.japanese_nlp import (
     build_underlined_sentence_html,
     find_i_plus_one_candidates,
     get_word_frequency_rank,
 )
+from app.pdf_layout import build_page_layout, get_pdf_info, pymupdf_available
 
 app = FastAPI(
     title="YomiCalibre — Japanese Text-Mining & Reader Pipeline",
@@ -171,12 +182,13 @@ class KnownWordsUploadRequest(BaseModel):
 
 
 @app.get("/api/books")
-def api_list_books(q: str = "", limit: int = 100) -> Dict[str, Any]:
+def api_list_books(q: str = "", limit: int = 200) -> Dict[str, Any]:
     books = list_all_books(search_query=q, limit=limit)
     return {
         "books": books,
         "total": len(books),
         "known_words_count": get_known_words_count(),
+        "library_error": get_last_library_error() or "",
     }
 
 
@@ -186,41 +198,216 @@ async def api_upload_book(file: UploadFile = File(...)) -> Dict[str, Any]:
         raise HTTPException(
             status_code=400, detail="Please upload a valid .epub or .pdf file."
         )
+
     safe_name = Path(file.filename).name
     dest = UPLOADS_DIR / safe_name
-    with dest.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
+    try:
+        with dest.open("wb") as f:
+            shutil.copyfileobj(file.file, f)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not save upload: {exc}")
+
+    size_bytes = dest.stat().st_size
+    if size_bytes == 0:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="The uploaded file was empty.")
+
+    book_id = local_book_id_for(safe_name)
     books = list_all_books()
-    return {"status": "ok", "filename": safe_name, "books": books}
+    book = next((b for b in books if b["book_id"] == book_id), None)
+
+    return {
+        "status": "ok",
+        "filename": safe_name,
+        "book_id": book_id,
+        "size_bytes": size_bytes,
+        "book": book,
+        "books": books,
+    }
 
 
-@app.get("/api/books/{book_id}/chapter/{chapter_index}")
-def api_get_chapter(book_id: str, chapter_index: int) -> Dict[str, Any]:
+def _require_book(book_id: str) -> Dict[str, Any]:
     book = get_book_descriptor(book_id)
     if not book:
         raise HTTPException(status_code=404, detail="Book not found in library.")
+    return book
+
+
+def _job_payload(book: Dict[str, Any]) -> Dict[str, Any]:
+    job = extraction_jobs.get_job(book["book_uuid"]) or {}
+    return {
+        "status": "extracting",
+        "book_id": book["book_uuid"],
+        "book_title": book.get("title", ""),
+        "job": job,
+    }
+
+
+@app.get("/api/books/{book_id}/extract-status")
+def api_extraction_status(book_id: str) -> Dict[str, Any]:
+    """Progress of the background extraction, polled by the reader while it waits."""
+    book = _require_book(book_id)
+    job = extraction_jobs.get_job(book["book_uuid"])
+    extracted = is_book_extracted(book["book_uuid"])
+    return {
+        "book_id": book["book_uuid"],
+        "is_extracted": extracted,
+        "status": "ready" if extracted else (job or {}).get("status", "idle"),
+        "job": job or {},
+    }
+
+
+@app.get("/api/books/{book_id}/chapter/{chapter_index}")
+def api_get_chapter(book_id: str, chapter_index: int):
+    """
+    Returns a cached section immediately. When the book has not been extracted yet,
+    extraction is started in the background and HTTP 202 is returned with progress,
+    so a slow Drive-backed book never blocks (or times out) the request.
+    """
+    book = _require_book(book_id)
+    book_uuid = book["book_uuid"]
+
+    if is_book_extracted(book_uuid):
+        section = get_cached_book_section(book_uuid, chapter_index)
+        if section is not None:
+            section["status"] = "ready"
+            return section
+
+    job = extraction_jobs.get_job(book_uuid)
+    if job and job["status"] == extraction_jobs.STATUS_ERROR:
+        extraction_jobs.clear_job(book_uuid)
+        raise HTTPException(
+            status_code=500, detail=f"Extraction failed: {job.get('error', 'unknown error')}"
+        )
+
+    if not (job and job["status"] == extraction_jobs.STATUS_RUNNING):
+        extraction_jobs.start_extraction(book)
+
+    return JSONResponse(status_code=202, content=_job_payload(book))
+
+
+# --- Classic PDF View (original rendering + clickable word overlay) ---
+
+
+@app.get("/api/books/{book_id}/file")
+def api_get_book_file(book_id: str):
+    """Streams the original file so pdf.js can render the PDF exactly as it is."""
+    book = _require_book(book_id)
+    path = Path(book["file_path"])
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="The book file is not reachable (Drive mount unavailable?).",
+        )
+    media_type = (
+        "application/pdf"
+        if book.get("preferred_format", "").upper() == "PDF"
+        else "application/epub+zip"
+    )
+    return FileResponse(str(path), media_type=media_type, filename=path.name)
+
+
+@app.get("/api/books/{book_id}/pdf/info")
+def api_pdf_info(book_id: str) -> Dict[str, Any]:
+    book = _require_book(book_id)
+    if book.get("preferred_format", "").upper() != "PDF":
+        raise HTTPException(status_code=400, detail="This book is not a PDF.")
+    if not pymupdf_available():
+        raise HTTPException(status_code=500, detail="PyMuPDF is not installed.")
+
+    path = Path(book["file_path"])
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="PDF file not reachable.")
+
+    info = get_pdf_info(path)
+    info.update(
+        {
+            "book_id": book["book_uuid"],
+            "book_title": book.get("title", ""),
+            "ocr": ocr_module.ocr_status(),
+            "cached_pages": count_cached_pdf_pages(book["book_uuid"]),
+        }
+    )
+    return info
+
+
+@app.get("/api/books/{book_id}/pdf/page/{page_number}")
+def api_pdf_page(book_id: str, page_number: int, force_ocr: bool = False) -> Dict[str, Any]:
+    """
+    Clickable word geometry for one PDF page: segmented by SudachiPy, positioned from
+    the embedded text layer, or from Tesseract OCR when the page is an image scan.
+    """
+    book = _require_book(book_id)
+    if book.get("preferred_format", "").upper() != "PDF":
+        raise HTTPException(status_code=400, detail="This book is not a PDF.")
+
+    path = Path(book["file_path"])
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="PDF file not reachable.")
+
     try:
-        section_data = ensure_book_extracted_and_get_section(book, chapter_index)
-        return section_data
+        return build_page_layout(
+            pdf_path=path,
+            page_number=max(0, page_number),
+            book_uuid=book["book_uuid"],
+            force_ocr=force_ocr,
+            book_title=book.get("title", ""),
+        )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Extraction error: {exc}")
+        raise HTTPException(status_code=500, detail=f"PDF page analysis failed: {exc}")
+
+
+@app.post("/api/books/{book_id}/pdf/analyze-all")
+def api_pdf_analyze_all(book_id: str, force_ocr: bool = False) -> Dict[str, Any]:
+    """
+    Runs the word layer over every page in the background (OCR included) so batch i+1
+    mining can see a scanned book in full. Progress is polled via /extract-status.
+    """
+    book = _require_book(book_id)
+    if book.get("preferred_format", "").upper() != "PDF":
+        raise HTTPException(status_code=400, detail="This book is not a PDF.")
+    if force_ocr and not ocr_module.is_available():
+        raise HTTPException(
+            status_code=400, detail=ocr_module.ocr_status()["reason"] or "OCR unavailable"
+        )
+
+    job = extraction_jobs.start_pdf_ocr(book, force=force_ocr)
+    return {"status": "started", "book_id": book["book_uuid"], "job": job}
+
+
+@app.delete("/api/books/{book_id}/pdf/cache")
+def api_clear_pdf_cache(book_id: str) -> Dict[str, Any]:
+    book = _require_book(book_id)
+    return {"status": "ok", "deleted_pages": clear_pdf_page_layouts(book["book_uuid"])}
+
+
+@app.get("/api/ocr/status")
+def api_ocr_status() -> Dict[str, Any]:
+    return ocr_module.ocr_status()
 
 
 @app.get("/api/books/{book_id}/candidates")
-def api_get_book_i_plus_one_candidates(
-    book_id: str, limit: int = 80
-) -> Dict[str, Any]:
+def api_get_book_i_plus_one_candidates(book_id: str, limit: int = 80):
     """
     Batch i+1 sentence mining endpoint:
     1. Ensures the book is extracted and cached in mining.db (keyed on books.uuid).
     2. Diffs all book sentences against the user's known Anki vocabulary.
     3. Ranks i+1 candidate sentences by word frequency and book occurrences.
     """
-    book = get_book_descriptor(book_id)
-    if not book:
-        raise HTTPException(status_code=404, detail="Book not found in library.")
+    book = _require_book(book_id)
 
-    ensure_book_extracted_and_get_section(book, 0)
+    if not is_book_extracted(book["book_uuid"]):
+        job = extraction_jobs.get_job(book["book_uuid"])
+        if job and job["status"] == extraction_jobs.STATUS_ERROR:
+            extraction_jobs.clear_job(book["book_uuid"])
+            raise HTTPException(
+                status_code=500,
+                detail=f"Extraction failed: {job.get('error', 'unknown error')}",
+            )
+        if not (job and job["status"] == extraction_jobs.STATUS_RUNNING):
+            extraction_jobs.start_extraction(book)
+        return JSONResponse(status_code=202, content=_job_payload(book))
+
     all_sentences = get_all_cached_sentences_for_book(book["book_uuid"])
     known_words = get_known_words_set()
 

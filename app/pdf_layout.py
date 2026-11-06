@@ -129,20 +129,26 @@ def _page_is_scan(page: Any, text_chars: int) -> bool:
     return False
 
 
-def _ocr_lines(page: Any) -> Tuple[List[Dict[str, Any]], str, bool]:
+def _ocr_lines(page: Any) -> Tuple[List[Dict[str, Any]], str, bool, str]:
     """
     Renders the page and OCRs it, returning character boxes converted from pixel
-    coordinates back into PDF points so both sources share one coordinate space.
+    coordinates back into PDF points so every engine shares one coordinate space.
     """
     import tempfile
 
     fitz = _require_pymupdf()
-    pix = page.get_pixmap(dpi=ocr_module.OCR_DPI, colorspace=fitz.csGRAY)
+    use_vision = ocr_module.vision_usable()
+    dpi = ocr_module.GOOGLE_VISION_DPI if use_vision else ocr_module.OCR_DPI
+    pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+
+    # Vision takes the image in the request body, so it gets a JPEG to keep the
+    # payload small; Tesseract reads a lossless PNG from disk.
+    image_bytes = pix.tobytes("jpeg", jpg_quality=85) if use_vision else None
 
     with tempfile.TemporaryDirectory() as tmp:
         img_path = Path(tmp) / "page.png"
         pix.save(str(img_path))
-        result = ocr_module.ocr_image_to_char_lines(img_path)
+        result = ocr_module.recognize_page(img_path, image_bytes=image_bytes)
 
     page_rect = page.rect
     scale_x = page_rect.width / pix.width if pix.width else 1.0
@@ -178,7 +184,7 @@ def _ocr_lines(page: Any) -> Tuple[List[Dict[str, Any]], str, bool]:
                 }
             )
 
-    return lines, result["lang"], result["vertical"]
+    return lines, result["lang"], result["vertical"], result.get("engine", "tesseract")
 
 
 # --- Grouping & alignment ----------------------------------------------------
@@ -358,6 +364,7 @@ def build_page_layout(
             width, height = float(rect.width), float(rect.height)
 
             ocr_lang = ""
+            ocr_engine = ""
             vertical = False
             source = "text-layer"
 
@@ -368,7 +375,7 @@ def build_page_layout(
             if force_ocr or _page_is_scan(page, total_chars):
                 if allow_ocr and ocr_module.is_available():
                     try:
-                        lines, ocr_lang, vertical = _ocr_lines(page)
+                        lines, ocr_lang, vertical, ocr_engine = _ocr_lines(page)
                         source = "ocr"
                     except Exception as exc:
                         # A failing OCR must not take the page down with it: the
@@ -393,6 +400,7 @@ def build_page_layout(
         "height": height,
         "source": source,
         "ocr_lang": ocr_lang,
+        "ocr_engine": ocr_engine,
         "vertical": vertical,
         "ocr_available": ocr_module.is_available(),
         "ocr_reason": ocr_error

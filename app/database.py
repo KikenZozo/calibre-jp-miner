@@ -552,6 +552,60 @@ def clear_pdf_page_layouts(book_uuid: str) -> int:
     return deleted
 
 
+def _current_billing_month() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def get_ocr_usage(engine: str = "google_vision", month: str = "") -> int:
+    """Pages sent to a paid OCR engine during a billing month."""
+    conn = get_db_connection()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ocr_usage (
+            engine TEXT NOT NULL,
+            month TEXT NOT NULL,
+            pages INTEGER DEFAULT 0,
+            PRIMARY KEY (engine, month)
+        )
+        """
+    )
+    row = conn.execute(
+        "SELECT pages FROM ocr_usage WHERE engine = ? AND month = ?",
+        (engine, month or _current_billing_month()),
+    ).fetchone()
+    conn.close()
+    return int(row["pages"]) if row else 0
+
+
+def record_ocr_usage(engine: str = "google_vision", pages: int = 1) -> int:
+    """Counts a page against the current month and returns the new total."""
+    month = _current_billing_month()
+    conn = get_db_connection()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ocr_usage (
+            engine TEXT NOT NULL,
+            month TEXT NOT NULL,
+            pages INTEGER DEFAULT 0,
+            PRIMARY KEY (engine, month)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO ocr_usage (engine, month, pages) VALUES (?, ?, ?)
+        ON CONFLICT(engine, month) DO UPDATE SET pages = pages + excluded.pages
+        """,
+        (engine, month, pages),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT pages FROM ocr_usage WHERE engine = ? AND month = ?", (engine, month)
+    ).fetchone()
+    conn.close()
+    return int(row["pages"]) if row else pages
+
+
 def get_cached_pdf_info(book_uuid: str) -> Optional[Dict[str, Any]]:
     """Cached page count / text-layer probe (page_number -1 is the per-book row)."""
     conn = get_db_connection()

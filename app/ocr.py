@@ -24,6 +24,26 @@ OCR_LANG_VERTICAL = os.getenv("OCR_LANG_VERTICAL", "jpn_vert")
 
 OCR_TIMEOUT_SECONDS = int(os.getenv("OCR_TIMEOUT_SECONDS", "120"))
 
+# --- Engine selection -------------------------------------------------------
+# "auto" prefers Google Vision when a key is configured and the monthly budget
+# still allows it, and falls back to Tesseract otherwise.
+OCR_ENGINE = os.getenv("OCR_ENGINE", "auto").strip().lower()
+
+GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY", "").strip()
+GOOGLE_VISION_ENDPOINT = os.getenv(
+    "GOOGLE_VISION_ENDPOINT", "https://vision.googleapis.com/v1/images:annotate"
+)
+# Google bills per page beyond the first 1000 each month. Staying inside the free
+# tier is the whole reason to pick a number here, so the cap is enforced rather
+# than trusted: past it, pages fall back to Tesseract instead of costing money.
+GOOGLE_VISION_MONTHLY_PAGE_LIMIT = int(
+    os.getenv("GOOGLE_VISION_MONTHLY_PAGE_LIMIT", "1000")
+)
+# Vision reads comfortably below Tesseract's resolution, and a smaller JPEG keeps
+# the request well inside the 20 MB limit.
+GOOGLE_VISION_DPI = int(os.getenv("GOOGLE_VISION_DPI", "200"))
+GOOGLE_VISION_TIMEOUT = int(os.getenv("GOOGLE_VISION_TIMEOUT", "60"))
+
 _BBOX_RE = re.compile(r"bbox (-?\d+) (-?\d+) (-?\d+) (-?\d+)")
 _CBOX_RE = re.compile(r"x_bboxes((?:\s+-?\d+)+)")
 _CONF_RE = re.compile(r"x_conf ([\d.]+)")
@@ -57,6 +77,28 @@ def available_languages() -> List[str]:
     return langs
 
 
+def vision_budget() -> Dict[str, Any]:
+    """Where this month stands against the free tier."""
+    from app.database import get_ocr_usage
+
+    used = get_ocr_usage("google_vision")
+    return {
+        "used": used,
+        "limit": GOOGLE_VISION_MONTHLY_PAGE_LIMIT,
+        "remaining": max(0, GOOGLE_VISION_MONTHLY_PAGE_LIMIT - used),
+        "exhausted": used >= GOOGLE_VISION_MONTHLY_PAGE_LIMIT > 0,
+    }
+
+
+def vision_usable() -> bool:
+    """Configured, selected, and still inside the monthly page budget."""
+    if not vision_configured() or OCR_ENGINE not in ("auto", "google_vision"):
+        return False
+    if GOOGLE_VISION_MONTHLY_PAGE_LIMIT <= 0:
+        return True
+    return not vision_budget()["exhausted"]
+
+
 def ocr_status() -> Dict[str, Any]:
     """Describes OCR readiness so the UI can explain exactly what is missing."""
     binary = tesseract_binary()
@@ -77,12 +119,35 @@ def ocr_status() -> Dict[str, Any]:
     else:
         reason = ""
 
+    tesseract_ready = bool(binary and has_jpn)
+    budget = vision_budget()
+    vision_ready = vision_usable()
+
+    if vision_ready:
+        engine = "google_vision"
+        reason = ""
+    elif tesseract_ready:
+        engine = "tesseract"
+        if vision_configured() and budget["exhausted"]:
+            reason = (
+                f"Google Vision budget for this month is used up "
+                f"({budget['used']}/{budget['limit']} pages); falling back to Tesseract."
+            )
+    else:
+        engine = "none"
+
     return {
-        "available": bool(binary and has_jpn),
+        "available": tesseract_ready or vision_ready,
+        "engine": engine,
         "binary": binary or "",
         "languages": langs,
         "has_vertical": has_vert,
-        "dpi": OCR_DPI,
+        "dpi": GOOGLE_VISION_DPI if vision_ready else OCR_DPI,
+        "tesseract_available": tesseract_ready,
+        "vision_configured": vision_configured(),
+        "vision_usable": vision_ready,
+        "vision_budget": budget,
+        "engine_setting": OCR_ENGINE,
         "reason": reason,
     }
 
@@ -242,6 +307,132 @@ def _parse_hocr_lines(hocr: str) -> List[Dict[str, Any]]:
     return lines
 
 
+# --- Google Cloud Vision -----------------------------------------------------
+
+
+def vision_configured() -> bool:
+    return bool(GOOGLE_VISION_API_KEY)
+
+
+def _vertices_to_bbox(bounding: Dict[str, Any]) -> Optional[List[float]]:
+    """
+    Axis-aligned box from Vision's four vertices.
+
+    Vision omits a coordinate entirely when it is zero, so a missing x or y means
+    0 rather than "unknown" — reading them with .get(..., 0) is deliberate.
+    """
+    vertices = bounding.get("vertices") or bounding.get("normalizedVertices") or []
+    xs = [float(v.get("x", 0) or 0) for v in vertices]
+    ys = [float(v.get("y", 0) or 0) for v in vertices]
+    if not xs or not ys:
+        return None
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def _symbol_breaks_line(symbol: Dict[str, Any]) -> bool:
+    break_type = (
+        symbol.get("property", {}).get("detectedBreak", {}).get("type", "")
+    )
+    return break_type in ("LINE_BREAK", "EOL_SURE_SPACE")
+
+
+def parse_vision_response(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Turns a DOCUMENT_TEXT_DETECTION response into the same character lines
+    Tesseract produces, so both engines feed one pipeline.
+
+    Vision returns a box per symbol, produced by the same model that read the
+    text, which is why its boxes cannot drift away from the glyphs they describe.
+    """
+    responses = payload.get("responses") or []
+    if not responses:
+        return []
+
+    first = responses[0]
+    if "error" in first and first["error"]:
+        message = first["error"].get("message", "unknown error")
+        raise RuntimeError(f"Google Vision error: {message}")
+
+    annotation = first.get("fullTextAnnotation") or {}
+    lines: List[Dict[str, Any]] = []
+
+    for page in annotation.get("pages", []):
+        for block in page.get("blocks", []):
+            for paragraph in block.get("paragraphs", []):
+                current: List[Dict[str, Any]] = []
+                for word in paragraph.get("words", []):
+                    for symbol in word.get("symbols", []):
+                        text = symbol.get("text", "")
+                        bbox = _vertices_to_bbox(symbol.get("boundingBox", {}))
+                        if text.strip() and bbox:
+                            current.append({"c": text, "bbox": bbox, "conf": 100.0 * float(symbol.get("confidence", 1.0) or 1.0)})
+                        if _symbol_breaks_line(symbol) and current:
+                            lines.append(_line_from_chars(current))
+                            current = []
+                if current:
+                    lines.append(_line_from_chars(current))
+
+    return lines
+
+
+def _line_from_chars(chars: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "bbox": [
+            min(c["bbox"][0] for c in chars),
+            min(c["bbox"][1] for c in chars),
+            max(c["bbox"][2] for c in chars),
+            max(c["bbox"][3] for c in chars),
+        ],
+        "chars": chars,
+    }
+
+
+def vision_image_to_char_lines(image_bytes: bytes) -> Dict[str, Any]:
+    """Sends one rendered page to Google Vision and returns its character lines."""
+    import base64
+
+    import httpx
+
+    if not GOOGLE_VISION_API_KEY:
+        raise RuntimeError("GOOGLE_VISION_API_KEY is not set")
+
+    request = {
+        "requests": [
+            {
+                "image": {"content": base64.b64encode(image_bytes).decode("ascii")},
+                "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
+                # Japanese plus vertical Japanese: the hint keeps Vision from
+                # reading a tategaki page as if it ran left to right.
+                "imageContext": {"languageHints": ["ja", "ja-t-i0-handwrit"]},
+            }
+        ]
+    }
+
+    response = httpx.post(
+        GOOGLE_VISION_ENDPOINT,
+        params={"key": GOOGLE_VISION_API_KEY},
+        json=request,
+        timeout=GOOGLE_VISION_TIMEOUT,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Google Vision HTTP {response.status_code}: {response.text[:200]}"
+        )
+
+    lines = parse_vision_response(response.json())
+    return {"lang": "google-vision", "vertical": _lines_look_vertical(lines), "lines": lines}
+
+
+def _lines_look_vertical(lines: List[Dict[str, Any]]) -> bool:
+    """True when most lines run down the page rather than across it."""
+    vertical = 0
+    for line in lines:
+        x0, y0, x1, y1 = line["bbox"]
+        if (y1 - y0) > (x1 - x0):
+            vertical += 1
+    return bool(lines) and vertical > len(lines) / 2
+
+
 def _score(lines: List[Dict[str, Any]]) -> float:
     """Confidence-weighted character count, used to pick horizontal vs vertical."""
     total = 0.0
@@ -249,6 +440,35 @@ def _score(lines: List[Dict[str, Any]]) -> float:
         for ch in line["chars"]:
             total += max(0.0, ch.get("conf", 0.0)) / 100.0
     return total
+
+
+def recognize_page(
+    image_path: Path, image_bytes: Optional[bytes] = None
+) -> Dict[str, Any]:
+    """
+    Reads one rendered page with whichever engine is available.
+
+    Google Vision first when it is configured and still inside its monthly budget,
+    because its Japanese accuracy — and its per-symbol boxes — are what the word
+    overlay needs. Tesseract remains the free fallback, including when the Vision
+    call fails, so a network hiccup degrades the reading instead of losing the page.
+    """
+    if vision_usable() and image_bytes is not None:
+        from app.database import record_ocr_usage
+
+        try:
+            result = vision_image_to_char_lines(image_bytes)
+            if result["lines"]:
+                record_ocr_usage("google_vision", 1)
+                result["engine"] = "google_vision"
+                return result
+            print("[OCR] Google Vision returned no text; falling back to Tesseract")
+        except Exception as exc:
+            print(f"[OCR] Google Vision failed ({exc}); falling back to Tesseract")
+
+    result = ocr_image_to_char_lines(image_path)
+    result["engine"] = "tesseract"
+    return result
 
 
 def ocr_image_to_char_lines(

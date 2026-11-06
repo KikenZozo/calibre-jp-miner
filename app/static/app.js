@@ -244,9 +244,23 @@ async function loadOcrStatus() {
   try {
     const res = await fetch("/api/ocr/status");
     const s = await res.json();
-    lbl.textContent = s.available
-      ? `✅ Tesseract ready (${s.languages.join(", ")}) at ${s.dpi} dpi`
-      : `⚠️ ${s.reason}`;
+    if (!s.available) {
+      lbl.textContent = `⚠️ ${s.reason}`;
+      return;
+    }
+
+    if (s.engine === "google_vision") {
+      const b = s.vision_budget || {};
+      lbl.textContent =
+        `✅ Google Vision active · ${b.used ?? 0}/${b.limit ?? 0} pages used this month` +
+        ` (${b.remaining ?? 0} free left), then Tesseract takes over`;
+    } else {
+      const extra = s.vision_configured
+        ? ` · ${s.reason || "Google Vision configured but not in use"}`
+        : "";
+      lbl.textContent =
+        `✅ Tesseract (${s.languages.join(", ")}) at ${s.dpi} dpi${extra}`;
+    }
   } catch (_) {
     lbl.textContent = "⚠️ Could not read OCR status.";
   }
@@ -986,9 +1000,13 @@ async function loadPdfWordLayer(bookId, pageNumber, token, forceOcr) {
     if (layout.source === "text-layer") {
       badge.textContent = `📝 Text layer · ${layout.words.length} words`;
     } else if (layout.source === "ocr") {
-      badge.textContent = `🔍 OCR (${layout.ocr_lang}${
+      const engine =
+        layout.ocr_engine === "google_vision"
+          ? "Google Vision"
+          : `Tesseract ${layout.ocr_lang}`;
+      badge.textContent = `🔍 OCR · ${engine}${
         layout.vertical ? ", vertical" : ""
-      }) · ${layout.words.length} words`;
+      } · ${layout.words.length} words`;
     } else if (layout.source === "ocr-failed") {
       // Say what actually went wrong rather than leaving "it does not work".
       badge.textContent = "⚠️ OCR failed on this page";

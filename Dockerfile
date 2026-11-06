@@ -30,6 +30,11 @@ ENV ANKI_DECK_NAME="Data Mining"
 ENV AUTO_MINE_ON_CLICK="true"
 ENV AUTO_DOWNLOAD_JMDICT="true"
 ENV OCR_DPI=300
+# Optional: set GOOGLE_VISION_API_KEY in the deployment environment (never here)
+# to use Google Vision for scanned pages. OCR_ENGINE=auto prefers it while the
+# monthly free budget lasts, then falls back to Tesseract on its own.
+ENV OCR_ENGINE=auto
+ENV GOOGLE_VISION_MONTHLY_PAGE_LIMIT=1000
 
 EXPOSE 8085
 

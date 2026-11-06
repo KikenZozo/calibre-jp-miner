@@ -465,6 +465,89 @@ def run_ocr_box_geometry_tests() -> None:
     print("[OK] Vertical (tategaki) line is de-clashed along y, keeping its width")
 
 
+def run_google_vision_tests() -> None:
+    """
+    The Vision response parser, exercised without calling Google.
+
+    Vision returns one box per symbol, produced by the same model that read the
+    text, which is the whole reason to prefer it: the boxes cannot drift away from
+    the glyphs. It also omits a vertex coordinate entirely when it is zero, which
+    a naive parser reads as a missing box.
+    """
+    from app import ocr as ocr_module
+
+    def vertex(x: int, y: int) -> dict:
+        v = {}
+        if x:
+            v["x"] = x  # Google leaves zeros out of the payload
+        if y:
+            v["y"] = y
+        return v
+
+    def symbol(text: str, x0: int, y0: int, x1: int, y1: int, brk: str = "") -> dict:
+        out = {
+            "text": text,
+            "confidence": 0.97,
+            "boundingBox": {
+                "vertices": [
+                    vertex(x0, y0), vertex(x1, y0), vertex(x1, y1), vertex(x0, y1)
+                ]
+            },
+        }
+        if brk:
+            out["property"] = {"detectedBreak": {"type": brk}}
+        return out
+
+    line_a, line_b = "彼は静かに", "窓から"
+    words = []
+    for text, top in ((line_a, 0), (line_b, 120)):
+        syms = [
+            symbol(ch, i * 40, top, (i + 1) * 40, top + 60,
+                   brk="LINE_BREAK" if i == len(text) - 1 else "")
+            for i, ch in enumerate(text)
+        ]
+        words.append({"symbols": syms})
+
+    payload = {
+        "responses": [
+            {"fullTextAnnotation": {"pages": [{"blocks": [{"paragraphs": [{"words": words}]}]}]}}
+        ]
+    }
+
+    lines = ocr_module.parse_vision_response(payload)
+    assert len(lines) == 2, f"expected two lines, got {len(lines)}"
+    assert "".join(c["c"] for c in lines[0]["chars"]) == line_a
+    assert "".join(c["c"] for c in lines[1]["chars"]) == line_b
+
+    # The first glyph sits at the origin, where Google omitted both coordinates.
+    first = lines[0]["chars"][0]["bbox"]
+    assert first == [0.0, 0.0, 40.0, 60.0], f"omitted zero vertices mis-parsed: {first}"
+    for line in lines:
+        for ch in line["chars"]:
+            x0, y0, x1, y1 = ch["bbox"]
+            assert x1 > x0 and y1 > y0, f"degenerate symbol box for {ch['c']}"
+    print(f"[OK] Google Vision response parsed into {len(lines)} lines of symbol boxes")
+
+    # An error payload must surface, not be read as an empty page.
+    try:
+        ocr_module.parse_vision_response(
+            {"responses": [{"error": {"message": "API key not valid"}}]}
+        )
+    except RuntimeError as exc:
+        assert "API key not valid" in str(exc)
+        print("[OK] Google Vision API errors are raised, not silently read as blank")
+    else:
+        raise AssertionError("a Vision error response was swallowed")
+
+    # Budget accounting drives the fallback, so it must be exact.
+    from app.database import get_ocr_usage, record_ocr_usage
+
+    before = get_ocr_usage("google_vision")
+    record_ocr_usage("google_vision", 3)
+    assert get_ocr_usage("google_vision") == before + 3
+    print("[OK] Vision page budget is counted per month")
+
+
 def run_illustration_toc_and_vocabulary_tests() -> None:
     import tempfile
 
@@ -561,4 +644,5 @@ if __name__ == "__main__":
     run_tests()
     run_pdf_and_library_tests()
     run_ocr_box_geometry_tests()
+    run_google_vision_tests()
     run_illustration_toc_and_vocabulary_tests()

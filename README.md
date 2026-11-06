@@ -59,6 +59,32 @@ result is cached in `mining.db` per page.
 If Tesseract is missing the app degrades instead of failing: the PDF still renders, the
 word layer is skipped, and **Settings → Scanned PDF OCR** says which package to install.
 
+### Google Vision (optional, better Japanese)
+
+Tesseract is weak on vertical Japanese with furigana — it interleaves the furigana with
+the main text and the result segments into words that do not exist. That is a model
+limitation, not a setting. Set `GOOGLE_VISION_API_KEY` to read scanned pages with Google
+Cloud Vision instead: its Japanese accuracy is far higher, and it returns **one box per
+symbol from the same model that read the text**, so the clickable word boxes cannot drift
+away from the glyphs.
+
+Google bills per page past the first 1000 each month. Staying inside that free tier is
+the point, so the cap is enforced rather than trusted: once
+`GOOGLE_VISION_MONTHLY_PAGE_LIMIT` pages have been sent in a calendar month, pages fall
+back to Tesseract instead of costing money, and **Settings** shows how much of the budget
+is left. A failed or unreachable Vision call also falls back rather than losing the page,
+and is not counted against the budget.
+
+| Variable                            | Default | Purpose                                              |
+|-------------------------------------|---------|------------------------------------------------------|
+| `GOOGLE_VISION_API_KEY`             | *unset* | Enables Vision. Set it in the deployment environment, never in the compose file |
+| `OCR_ENGINE`                        | `auto`  | `auto` prefers Vision while budget lasts; `tesseract` or `google_vision` force one |
+| `GOOGLE_VISION_MONTHLY_PAGE_LIMIT`  | `1000`  | Monthly page cap; `0` disables the cap                |
+| `GOOGLE_VISION_DPI`                 | `200`   | Render resolution for Vision (it needs less than Tesseract) |
+
+Pages are sent to Google as JPEG when this is enabled — scanned content leaves your
+server. Leave `GOOGLE_VISION_API_KEY` unset to keep everything local.
+
 | Variable              | Default    | Purpose                                      |
 |-----------------------|------------|----------------------------------------------|
 | `OCR_DPI`             | `300`      | Page rendering resolution for OCR            |
@@ -84,7 +110,9 @@ The test suite covers sentence splitting, `<ruby>` stripping, JMdict lookup, `i+
 ranking, deterministic Anki GUIDs, the library-ordering regression (an upload must stay
 visible behind a large Calibre library), PDF text-layer word geometry, the OCR fallback,
 illustration extraction, contents-page links, the NCX table of contents, stale-cache
-re-extraction, and the precedence rules for known / not-known words.
+re-extraction, the precedence rules for known / not-known words, OCR box geometry
+(horizontal and vertical), and the Google Vision response parser. The Vision tests use a
+recorded payload and never call Google, so the suite runs offline and costs nothing.
 
 ### Re-extraction after an upgrade
 

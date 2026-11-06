@@ -295,9 +295,27 @@ def run_pdf_and_library_tests() -> None:
                     assert a["rects"][0][2] <= b["rects"][0][2] + 0.001, (
                         f"overlapping OCR boxes: {a['surface']} / {b['surface']}"
                     )
+            # Regression: direction was inferred by summing per-character widths
+            # and heights. A CJK glyph is about as tall as it is wide, so the
+            # heights always won, every horizontal line was taken for vertical
+            # text, and the de-clashing trimmed each box down to a zero-height
+            # sliver — words rendered as unclickable slivers off the glyphs.
+            boxed = [w for w in scan_layout["words"] if w["rects"]]
+            heights = [r[3] - r[1] for w in boxed for r in w["rects"]]
+            collapsed = [h for h in heights if h < 0.008]
+            assert heights, "OCR produced no boxes at all"
+            assert len(collapsed) <= len(heights) * 0.1, (
+                f"{len(collapsed)}/{len(heights)} OCR boxes collapsed to slivers — "
+                "writing direction was misdetected"
+            )
+            median_height = sorted(heights)[len(heights) // 2]
+            assert median_height > 0.008, (
+                f"median OCR box height {median_height:.4f} is too small to click"
+            )
             print(
                 f"[OK] Scanned PDF -> OCR ({scan_layout['ocr_lang']}) produced "
-                f"{len(scan_layout['words'])} positioned words"
+                f"{len(scan_layout['words'])} positioned words, "
+                f"median box height {median_height:.3f}, {len(collapsed)} collapsed"
             )
         else:
             assert scan_layout["source"] == "none"
@@ -389,6 +407,62 @@ def _build_illustrated_epub(path: Path) -> None:
         zf.writestr("OEBPS/images/cover.png", png(10, 14))
         zf.writestr("OEBPS/text/chapter1.xhtml", chapter)
         zf.writestr("OEBPS/images/plate1.png", png(8, 6))
+
+
+def run_ocr_box_geometry_tests() -> None:
+    """
+    Writing direction must come from how far a line runs, not from glyph size.
+
+    A CJK glyph is about as tall as it is wide, so summing per-character widths and
+    heights made every horizontal Japanese line look vertical. The box de-clashing
+    then trimmed each character's bottom down to the next character's top, which on
+    a horizontal line is the same y — collapsing every word to a zero-height sliver
+    that could not be clicked and did not sit on the text.
+    """
+    from app.ocr import _declash_char_boxes
+
+    # A horizontal line of 20 CJK glyphs: each taller than wide, laid out left to
+    # right, with the baseline jitter of a couple of pixels that real OCR always
+    # reports. The jitter matters: it is what made the faulty vertical branch trim
+    # each box down to its neighbour's top edge.
+    glyph_w, glyph_h = 40.0, 60.0
+    horizontal = [
+        {
+            "c": "字",
+            "bbox": [
+                i * glyph_w,
+                100.0 + (i % 3),
+                (i + 1) * glyph_w,
+                100.0 + glyph_h + (i % 3),
+            ],
+            "conf": 95.0,
+        }
+        for i in range(20)
+    ]
+    cleaned = _declash_char_boxes([dict(c, bbox=list(c["bbox"])) for c in horizontal])
+    heights = [c["bbox"][3] - c["bbox"][1] for c in cleaned]
+    assert heights, "every box was discarded"
+    assert min(heights) > glyph_h * 0.8, (
+        f"horizontal line was treated as vertical: box heights collapsed to {min(heights):.1f} "
+        f"(expected about {glyph_h})"
+    )
+    print(f"[OK] Horizontal CJK line keeps its box height ({min(heights):.0f}px of {glyph_h:.0f})")
+
+    # A vertical line (tategaki) must still be de-clashed along y.
+    vertical = [
+        {"c": "字", "bbox": [100.0, i * glyph_h, 100.0 + glyph_w, (i + 1) * glyph_h + 18.0], "conf": 95.0}
+        for i in range(20)
+    ]
+    cleaned_v = _declash_char_boxes([dict(c, bbox=list(c["bbox"])) for c in vertical])
+    overlaps = [
+        1
+        for a, bx in zip(cleaned_v, cleaned_v[1:])
+        if a["bbox"][3] > bx["bbox"][1] + 0.01
+    ]
+    assert not overlaps, "vertical boxes still overlap their neighbour"
+    widths = [c["bbox"][2] - c["bbox"][0] for c in cleaned_v]
+    assert min(widths) > glyph_w * 0.8, "vertical line lost its box width"
+    print("[OK] Vertical (tategaki) line is de-clashed along y, keeping its width")
 
 
 def run_illustration_toc_and_vocabulary_tests() -> None:
@@ -486,4 +560,5 @@ def run_illustration_toc_and_vocabulary_tests() -> None:
 if __name__ == "__main__":
     run_tests()
     run_pdf_and_library_tests()
+    run_ocr_box_geometry_tests()
     run_illustration_toc_and_vocabulary_tests()

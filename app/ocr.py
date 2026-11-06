@@ -162,9 +162,14 @@ def _declash_char_boxes(chars: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if len(chars) < 2:
         return chars
 
-    width = sum(c["bbox"][2] - c["bbox"][0] for c in chars)
-    height = sum(c["bbox"][3] - c["bbox"][1] for c in chars)
-    vertical = height > width
+    # Direction comes from how far the line RUNS, not from the size of its glyphs.
+    # Summing per-character widths and heights always made Japanese look vertical —
+    # a CJK glyph is about as tall as it is wide, so the heights win every time —
+    # and the trimming below then collapsed every box on a horizontal line to a
+    # zero-height sliver, leaving words that could not be clicked.
+    x_span = max(c["bbox"][2] for c in chars) - min(c["bbox"][0] for c in chars)
+    y_span = max(c["bbox"][3] for c in chars) - min(c["bbox"][1] for c in chars)
+    vertical = y_span > x_span
 
     for i in range(len(chars) - 1):
         cur, nxt = chars[i]["bbox"], chars[i + 1]["bbox"]

@@ -1139,3 +1139,262 @@ body {
     padding: 8px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Illustrations
+--------------------------------------------------------------------------- */
+.reader-figure {
+  margin: 1.6em auto;
+  text-align: center;
+}
+
+.reader-figure img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.reader-figure figcaption {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.reader-figure.is-broken img {
+  display: none;
+}
+
+.reader-figure.is-broken::after {
+  content: "🖼 illustration unavailable";
+  display: inline-block;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  border: 1px dashed var(--border-color);
+  border-radius: 6px;
+}
+
+/* In-book links (a contents page, a footnote reference) */
+.reader-block.is-link {
+  cursor: pointer;
+  color: var(--accent-light);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.reader-block.is-link:hover {
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
+
+/* ---------------------------------------------------------------------------
+   Known / unknown vocabulary colouring
+--------------------------------------------------------------------------- */
+:root,
+[data-theme="dark"] {
+  --vocab-new: #f0abfc;
+  --vocab-new-soft: rgba(240, 171, 252, 0.16);
+  --vocab-mined: #fcd34d;
+  --vocab-known: #86efac;
+  --vocab-unknown: #fca5a5;
+}
+
+[data-theme="sepia"] {
+  --vocab-new: #9d174d;
+  --vocab-new-soft: rgba(157, 23, 77, 0.12);
+  --vocab-mined: #a16207;
+  --vocab-known: #15803d;
+  --vocab-unknown: #b91c1c;
+}
+
+[data-theme="light"] {
+  --vocab-new: #a21caf;
+  --vocab-new-soft: rgba(162, 28, 175, 0.1);
+  --vocab-mined: #b45309;
+  --vocab-known: #15803d;
+  --vocab-unknown: #dc2626;
+}
+
+/* Colours apply only while the mode is on, so plain reading stays plain.
+   Marking is by exception: in a new book almost every word is unfamiliar, so
+   filling those in would highlight the entire page and help nobody. New words
+   keep the normal reading colour with a light underline, words you have already
+   acquired recede, and anything you flagged as not-known stands out. */
+.vocab-colors .jp-word.v-new {
+  text-decoration: underline dotted var(--vocab-new);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.vocab-colors .jp-word.v-mined {
+  color: var(--vocab-mined);
+  text-decoration: underline dotted var(--vocab-mined);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+/* Known words recede, so what is left to learn is what catches the eye. */
+.vocab-colors .jp-word.v-known {
+  color: var(--vocab-known);
+  opacity: 0.72;
+}
+
+.vocab-colors .jp-word.v-unknown {
+  color: var(--vocab-unknown);
+  background: rgba(252, 165, 165, 0.14);
+  border-radius: 3px;
+  text-decoration: underline wavy var(--vocab-unknown);
+  text-underline-offset: 3px;
+}
+
+/* Headings are navigation, not study material: leave them alone. */
+.vocab-colors .reader-block.heading .jp-word,
+.vocab-colors h1 .jp-word,
+.vocab-colors h2 .jp-word,
+.vocab-colors h3 .jp-word {
+  text-decoration: none;
+  opacity: 1;
+  color: inherit;
+  background: none;
+}
+
+/* On the PDF overlay the page itself is an image, so tint the box instead. */
+.vocab-colors .pdf-word.v-new {
+  background: var(--vocab-new-soft);
+}
+
+.vocab-colors .pdf-word.v-known {
+  background: rgba(134, 239, 172, 0.22);
+}
+
+.vocab-colors .pdf-word.v-mined {
+  background: rgba(252, 211, 77, 0.2);
+}
+
+.vocab-colors .pdf-word.v-unknown {
+  background: rgba(252, 165, 165, 0.26);
+}
+
+.vocab-legend {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 14px;
+  padding: 5px 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.vocab-colors .vocab-legend {
+  display: flex;
+}
+
+.vocab-legend::-webkit-scrollbar {
+  display: none;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.swatch.v-new { background: var(--vocab-new); }
+.swatch.v-mined { background: var(--vocab-mined); }
+.swatch.v-known { background: var(--vocab-known); }
+.swatch.v-unknown { background: var(--vocab-unknown); }
+
+.legend-hint {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+
+.btn-known {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-known:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.btn-known.is-known {
+  background: var(--success-soft);
+  color: var(--success);
+  border-color: transparent;
+}
+
+/* ---------------------------------------------------------------------------
+   Table of contents
+--------------------------------------------------------------------------- */
+.toc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.toc-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+}
+
+.toc-entry:hover {
+  background: var(--bg-elevated);
+}
+
+.toc-entry.is-current {
+  background: var(--accent-soft);
+  color: var(--accent-light);
+  font-weight: 600;
+}
+
+.toc-entry.is-missing {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.toc-entry .toc-num {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 2.2em;
+}
+
+.toc-entry.lvl-1 { padding-left: 26px; font-size: 13px; }
+.toc-entry.lvl-2 { padding-left: 44px; font-size: 13px; }
+.toc-entry.lvl-3 { padding-left: 62px; font-size: 12px; }

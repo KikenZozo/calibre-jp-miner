@@ -17,6 +17,8 @@ const state = {
   sentencesMap: {},
   lastClickedPayload: null,
   activeMode: "reader", // 'pdf' | 'reader' | 'candidates'
+  toc: [],
+  colorVocab: true,
   chapterLoadToken: 0,
   extractPollTimer: null,
   settings: {
@@ -28,6 +30,7 @@ const state = {
   pdf: {
     lib: null,
     doc: null,
+    task: null,
     info: null,
     pageNumber: 0,
     scale: 1.2,
@@ -41,13 +44,31 @@ const state = {
 const PDF_MIN_SCALE = 0.4;
 const PDF_MAX_SCALE = 4;
 
+// Above this size, fetching the whole PDF up front costs more than the extra
+// round trips of range requests. See the comment in openPdfView().
+const LAZY_PDF_THRESHOLD_BYTES = 40 * 1024 * 1024;
+
 document.addEventListener("DOMContentLoaded", async () => {
   initLocalPreferences();
   bindUIEvents();
   await loadSettings();
   await loadLibrary();
+  preloadPdfLib();
   await refreshAnkiBadgeAndTryAutoFlush();
 });
+
+/**
+ * pdf.js is ~3 MB of JS. Fetching it while the user is still looking at the library
+ * means opening a PDF does not start with a cold 3 MB download.
+ */
+function preloadPdfLib() {
+  const start = () => {
+    if (!state.books.some(isPdfBook)) return;
+    getPdfLib().catch(() => {});
+  };
+  if ("requestIdleCallback" in window) requestIdleCallback(start, { timeout: 4000 });
+  else setTimeout(start, 1200);
+}
 
 // --- Preferences -----------------------------------------------------------
 
@@ -55,6 +76,98 @@ function initLocalPreferences() {
   applyTheme(localStorage.getItem("yc_theme") || "dark");
   applyFontSize(localStorage.getItem("yc_font_size") || "20");
   applyFontFamily(localStorage.getItem("yc_font_family") || "mincho");
+  applyVocabColors(localStorage.getItem("yc_vocab_colors") !== "false");
+}
+
+/** Turns the known/unknown colouring on or off everywhere at once. */
+function applyVocabColors(enabled) {
+  state.colorVocab = !!enabled;
+  document.body.classList.toggle("vocab-colors", state.colorVocab);
+  localStorage.setItem("yc_vocab_colors", state.colorVocab ? "true" : "false");
+  ["chk-color-vocab", "chk-color-vocab-pdf"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = state.colorVocab;
+  });
+}
+
+/**
+ * Records that a word is (or is not) known and recolours every occurrence on the
+ * page immediately, in the reader and on the PDF overlay alike.
+ */
+async function setWordKnown(lemma, known) {
+  if (!lemma) return;
+  const nextState = known ? "known" : "unknown";
+
+  document
+    .querySelectorAll(
+      `.jp-word[data-base="${cssEscape(lemma)}"], .pdf-word[data-base="${cssEscape(lemma)}"]`
+    )
+    .forEach((el) => {
+      el.classList.remove("v-new", "v-mined", "v-known", "v-unknown");
+      el.classList.add(vocabClass(nextState));
+      el.dataset.vocabState = nextState;
+    });
+
+  updateKnownButton(nextState);
+
+  try {
+    const res = await fetch("/api/known-words/mark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lemma, known }),
+    });
+    const data = await res.json();
+    if (typeof data.known_words_count === "number") {
+      document.getElementById("lbl-known-count").textContent =
+        data.known_words_count.toLocaleString();
+    }
+  } catch (err) {
+    console.error("Could not save the known/unknown mark:", err);
+  }
+}
+
+function updateKnownButton(stateName) {
+  const btn = document.getElementById("btn-toggle-known");
+  if (!btn) return;
+  const isKnown = stateName === "known" || stateName === "mined";
+  btn.classList.toggle("is-known", isKnown);
+  btn.textContent = isKnown ? "✓ Known" : "✓ I know this";
+  btn.title = isKnown
+    ? "Click to mark this word as NOT known"
+    : "Click to mark this word as known";
+}
+
+// --- Table of contents ---
+
+function openTocPanel() {
+  const listEl = document.getElementById("toc-list");
+  const entries = state.toc || [];
+  listEl.innerHTML = "";
+
+  if (!entries.length) {
+    listEl.innerHTML = `<p class="subtitle">This book declares no table of contents. Use the section selector instead.</p>`;
+  } else {
+    entries.forEach((entry, idx) => {
+      const btn = document.createElement("button");
+      const hasTarget = typeof entry.section_index === "number";
+      btn.className = `toc-entry lvl-${Math.min(entry.level || 0, 3)}`;
+      btn.classList.toggle("is-current", entry.section_index === state.currentChapterIndex);
+      btn.classList.toggle("is-missing", !hasTarget);
+      btn.innerHTML =
+        `<span class="toc-num">${hasTarget ? entry.section_index + 1 : "—"}</span>` +
+        `<span>${escapeHtml(entry.title)}</span>`;
+      if (hasTarget) {
+        btn.addEventListener("click", () => {
+          document.getElementById("modal-toc").classList.add("hidden");
+          if (state.activeMode !== "reader") switchBookMode("reader", entry.section_index);
+          else loadChapter(state.currentBook.book_id, entry.section_index);
+        });
+      }
+      listEl.appendChild(btn);
+    });
+  }
+
+  document.getElementById("modal-toc").classList.remove("hidden");
 }
 
 function applyTheme(theme) {
@@ -384,6 +497,7 @@ async function loadChapter(bookId, chapterIndex, restoreScrollRatio = 0) {
     state.currentChapterIndex = data.chapter_index;
     state.chapterData = data;
     state.sentencesMap = data.sentences || {};
+    if (Array.isArray(data.toc) && data.toc.length) state.toc = data.toc;
 
     populateChapterSelect(data.chapters || [], data.chapter_index);
 
@@ -519,9 +633,27 @@ function renderTokenizedChapter(data) {
   const frag = document.createDocumentFragment();
 
   for (const block of data.blocks || []) {
+    if (block.type === "image") {
+      const fig = buildIllustration(block);
+      if (fig) frag.appendChild(fig);
+      continue;
+    }
+
     const tag = ["h1", "h2", "h3", "h4"].includes(block.type) ? block.type : "p";
     const blockEl = document.createElement(tag);
     blockEl.className = `reader-block ${block.style_class || ""}`.trim();
+
+    // A block that is essentially one link (a contents entry) becomes clickable.
+    if (block.link_href) {
+      blockEl.classList.add("is-link");
+      blockEl.dataset.linkHref = block.link_href;
+      if (typeof block.link_target === "number") {
+        blockEl.dataset.linkTarget = String(block.link_target);
+        blockEl.title = `Go to section ${block.link_target + 1}`;
+      } else {
+        blockEl.title = "This link points outside the book";
+      }
+    }
 
     for (const sent of block.sentences || []) {
       const sentSpan = document.createElement("span");
@@ -533,7 +665,7 @@ function renderTokenizedChapter(data) {
           sentSpan.appendChild(document.createTextNode(tok.surface));
         } else {
           const wordSpan = document.createElement("span");
-          wordSpan.className = "jp-word";
+          wordSpan.className = `jp-word ${vocabClass(tok.vocab_state)}`;
           wordSpan.textContent = tok.surface;
           applyWordDataset(wordSpan, tok, sent.sid);
           sentSpan.appendChild(wordSpan);
@@ -548,6 +680,46 @@ function renderTokenizedChapter(data) {
   article.appendChild(frag);
 }
 
+/** Maps a word's familiarity to the CSS class that colours it. */
+function vocabClass(stateName) {
+  switch (stateName) {
+    case "known":
+      return "v-known";
+    case "mined":
+      return "v-mined";
+    case "unknown":
+      return "v-unknown";
+    default:
+      return "v-new";
+  }
+}
+
+/**
+ * Illustrations are served out of the EPUB itself; a reference the book declares
+ * but does not actually contain degrades to a placeholder rather than a broken image.
+ */
+function buildIllustration(block) {
+  if (!block.src || !state.currentBook) return null;
+  const fig = document.createElement("figure");
+  fig.className = "reader-figure";
+
+  const img = document.createElement("img");
+  img.loading = "lazy";
+  img.alt = block.alt || "";
+  img.src =
+    `/api/books/${encodeURIComponent(state.currentBook.book_id)}/resource` +
+    `?path=${encodeURIComponent(block.src)}`;
+  img.addEventListener("error", () => fig.classList.add("is-broken"));
+  fig.appendChild(img);
+
+  if (block.alt) {
+    const caption = document.createElement("figcaption");
+    caption.textContent = block.alt;
+    fig.appendChild(caption);
+  }
+  return fig;
+}
+
 function applyWordDataset(el, tok, sid) {
   el.dataset.wid = tok.wid;
   el.dataset.sid = sid;
@@ -559,6 +731,7 @@ function applyWordDataset(el, tok, sid) {
   el.dataset.surfHira = tok.surface_hiragana || "";
   el.dataset.surfKata = tok.surface_katakana || "";
   el.dataset.posDetail = tok.pos_detail || "";
+  el.dataset.vocabState = tok.vocab_state || "new";
 }
 
 // --- Classic PDF view ------------------------------------------------------
@@ -572,12 +745,7 @@ async function getPdfLib() {
 }
 
 function releasePdfDocument() {
-  if (state.pdf.doc) {
-    try {
-      state.pdf.doc.destroy();
-    } catch (_) {}
-  }
-  state.pdf.doc = null;
+  releaseOnlyDoc();
   state.pdf.info = null;
   state.pdf.layout = null;
 }
@@ -599,30 +767,68 @@ async function openPdfView() {
   const book = state.currentBook;
   if (!book) return;
 
-  setPdfMessage("Loading the original PDF…");
+  setPdfMessage("Opening the PDF…");
 
   try {
-    const infoRes = await fetch(
+    // The page-count probe and the document load are independent: start them
+    // together instead of waiting for the first before beginning the second.
+    const infoPromise = fetch(
       `/api/books/${encodeURIComponent(book.book_id)}/pdf/info`
-    );
-    if (!infoRes.ok) {
-      const detail = await infoRes.json().catch(() => ({}));
-      throw new Error(detail.detail || `HTTP ${infoRes.status}`);
-    }
-    state.pdf.info = await infoRes.json();
+    ).then(async (res) => {
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      return res.json();
+    });
 
     const lib = await getPdfLib();
     releaseOnlyDoc();
+
+    // The library listing already carries the file size, so this costs no round trip.
+    const lazyLoad = (book.uncompressed_size || 0) > LAZY_PDF_THRESHOLD_BYTES;
+
     const task = lib.getDocument({
-      url: `/api/books/${encodeURIComponent(book.book_id)}/file`,
-      // Japanese PDFs lean on CJK CMaps and standard fonts
+      // Absolute on purpose: pdf.js gates range support on
+      // /^https?:/.test(source.url), so a relative URL silently disables range
+      // mode and makes it download the whole book.
+      url: new URL(
+        `/api/books/${encodeURIComponent(book.book_id)}/file`,
+        window.location.href
+      ).href,
       // Vendored CJK CMaps + standard fonts: many Japanese PDFs use CID-keyed
       // Adobe-Japan1 encodings and render blank without them.
       cMapUrl: "/vendor/pdfjs/cmaps/",
       cMapPacked: true,
       standardFontDataUrl: "/vendor/pdfjs/standard_fonts/",
-      disableAutoFetch: false,
+      // How the bytes are fetched matters a lot, and the best answer depends on
+      // size (measured at 8 Mbit/s, 60 ms RTT, on a 6.4 MB scan):
+      //
+      //   streaming  : 7.7 s to first page — pdf.js renders progressively from
+      //                the single response, before the file has fully arrived.
+      //   range mode : 9.1 s — 26 sequential 256 KB round trips cost more than
+      //                they save, because this document needs most of its bytes
+      //                anyway.
+      //
+      // So stream by default, and switch to lazy range requests only for books
+      // big enough that downloading the whole thing is the dominant cost.
+      // Range mode needs BOTH flags: pdf.js only cancels its initial full-file
+      // request when streaming is off.
+      ...(lazyLoad
+        ? { disableAutoFetch: true, disableStream: true, rangeChunkSize: 1048576 }
+        : { disableAutoFetch: false, disableStream: false }),
     });
+    state.pdf.task = task;
+
+    task.onProgress = ({ loaded, total }) => {
+      if (state.pdf.doc) return; // the page is already up
+      setPdfMessage(
+        total
+          ? `Opening the PDF… ${formatBytes(loaded)} / ${formatBytes(total)}`
+          : `Opening the PDF… ${formatBytes(loaded)}`
+      );
+    };
+
     state.pdf.doc = await task.promise;
 
     document.getElementById("lbl-pdf-pagecount").textContent = `/ ${state.pdf.doc.numPages}`;
@@ -633,7 +839,14 @@ async function openPdfView() {
         ? Math.min(Math.max(0, book.progress.chapter_index), state.pdf.doc.numPages - 1)
         : 0;
 
-    await renderPdfPage(startPage);
+    // Draw the page first; the info probe only feeds toolbar badges.
+    const rendering = renderPdfPage(startPage);
+    infoPromise
+      .then((info) => {
+        state.pdf.info = info;
+      })
+      .catch((err) => console.warn("PDF info probe failed:", err));
+    await rendering;
   } catch (err) {
     console.error("PDF view failed:", err);
     setPdfMessage(
@@ -645,6 +858,12 @@ async function openPdfView() {
 }
 
 function releaseOnlyDoc() {
+  if (state.pdf.task) {
+    try {
+      state.pdf.task.destroy();
+    } catch (_) {}
+    state.pdf.task = null;
+  }
   if (state.pdf.doc) {
     try {
       state.pdf.doc.destroy();
@@ -770,7 +989,7 @@ function renderPdfWordBoxes(layout) {
     for (let i = 0; i < word.rects.length; i++) {
       const [x0, y0, x1, y1] = word.rects[i];
       const el = document.createElement("span");
-      el.className = "pdf-word";
+      el.className = `pdf-word ${vocabClass(word.vocab_state)}`;
       el.style.left = `${x0 * 100}%`;
       el.style.top = `${y0 * 100}%`;
       el.style.width = `${Math.max(0.0015, x1 - x0) * 100}%`;
@@ -1071,6 +1290,7 @@ async function handleWordClick(wordEl) {
     sentence_tokens: sentenceTokens,
   };
   state.lastClickedPayload = payload;
+  updateKnownButton(wordEl.dataset.vocabState || "new");
 
   openInspectorDockLoading(payload);
   requestAnimationFrame(() => ensureWordVisibleInViewport(wordEl));
@@ -1098,6 +1318,17 @@ async function handleWordClick(wordEl) {
           ).textContent = `✅ Added to Anki (${state.settings.anki_deck_name})`;
         }
       }
+      // A mined word is, by definition, one you have now encountered.
+      const lemma = payload.base || payload.surface;
+      document
+        .querySelectorAll(`.jp-word[data-base="${cssEscape(lemma)}"], .pdf-word[data-base="${cssEscape(lemma)}"]`)
+        .forEach((el) => {
+          if (el.dataset.vocabState === "new") {
+            el.classList.remove("v-new");
+            el.classList.add("v-mined");
+            el.dataset.vocabState = "mined";
+          }
+        });
       await refreshAnkiBadgeAndTryAutoFlush();
     }
   } catch (err) {
@@ -1447,7 +1678,18 @@ function bindReaderEvents() {
     if (wordEl) {
       e.stopPropagation();
       handleWordClick(wordEl);
-    } else if (!e.target.closest(".chapter-footer-nav, .reader-notice")) {
+      return;
+    }
+
+    const linkEl = e.target.closest(".reader-block.is-link");
+    if (linkEl && linkEl.dataset.linkTarget !== undefined) {
+      e.stopPropagation();
+      closeInspectorDock();
+      loadChapter(state.currentBook.book_id, parseInt(linkEl.dataset.linkTarget, 10));
+      return;
+    }
+
+    if (!e.target.closest(".chapter-footer-nav, .reader-notice")) {
       closeInspectorDock();
     }
   });
@@ -1491,6 +1733,27 @@ function bindReaderEvents() {
   document.getElementById("select-chapter").addEventListener("change", (e) => {
     if (!state.currentBook) return;
     loadChapter(state.currentBook.book_id, parseInt(e.target.value, 10));
+  });
+
+  document.getElementById("btn-open-toc").addEventListener("click", openTocPanel);
+  document.getElementById("btn-close-toc").addEventListener("click", () => {
+    document.getElementById("modal-toc").classList.add("hidden");
+  });
+
+  ["chk-color-vocab", "chk-color-vocab-pdf"].forEach((id) => {
+    document.getElementById(id).addEventListener("change", (e) => {
+      applyVocabColors(e.target.checked);
+    });
+  });
+
+  document.getElementById("btn-toggle-known").addEventListener("click", () => {
+    const payload = state.lastClickedPayload;
+    if (!payload) return;
+    const lemma = payload.base || payload.surface;
+    const current = document
+      .getElementById("btn-toggle-known")
+      .classList.contains("is-known");
+    setWordKnown(lemma, !current);
   });
 
   document.getElementById("btn-prev-chap").addEventListener("click", () => goToSection(-1));

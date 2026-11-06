@@ -18,7 +18,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app import ocr as ocr_module
 from app.database import (
+    get_cached_pdf_info,
     get_cached_pdf_page_layout,
+    store_pdf_info,
     store_pdf_page_layout,
     store_section_sentences,
 )
@@ -231,8 +233,20 @@ class _CharCursor:
 # --- Public API --------------------------------------------------------------
 
 
-def get_pdf_info(pdf_path: Path, sample_pages: int = 12) -> Dict[str, Any]:
-    """Page count plus a cheap text-layer probe, without extracting anything."""
+def get_pdf_info(
+    pdf_path: Path, sample_pages: int = 4, book_uuid: str = ""
+) -> Dict[str, Any]:
+    """
+    Page count plus a cheap text-layer probe, without extracting anything.
+
+    Sampling reads real pages, which costs real Drive reads, so the answer is cached
+    per book: opening the same PDF again does not re-probe it.
+    """
+    if book_uuid:
+        cached = get_cached_pdf_info(book_uuid)
+        if cached is not None:
+            return cached
+
     fitz = _require_pymupdf()
     with _PDF_LOCK:
         doc = fitz.open(str(pdf_path))
@@ -256,7 +270,7 @@ def get_pdf_info(pdf_path: Path, sample_pages: int = 12) -> Dict[str, Any]:
         finally:
             doc.close()
 
-    return {
+    info = {
         "page_count": page_count,
         "has_text_layer": sampled_chars >= 20,
         "text_pages_sampled": text_pages,
@@ -264,6 +278,9 @@ def get_pdf_info(pdf_path: Path, sample_pages: int = 12) -> Dict[str, Any]:
         "first_page_width": width,
         "first_page_height": height,
     }
+    if book_uuid:
+        store_pdf_info(book_uuid, info)
+    return info
 
 
 def build_page_layout(
@@ -429,7 +446,7 @@ def analyze_whole_pdf(
     if the job is interrupted.
     """
     report = progress or (lambda *a, **k: None)
-    info = get_pdf_info(pdf_path)
+    info = get_pdf_info(pdf_path, book_uuid=book_uuid)
     total = info["page_count"]
 
     pages_done = 0

@@ -4,7 +4,8 @@ import threading
 import warnings
 import zipfile
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from urllib.parse import unquote
 from xml.etree import ElementTree as ET
 
 from bs4 import BeautifulSoup, NavigableString, Tag, XMLParsedAsHTMLWarning
@@ -48,6 +49,11 @@ HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 
 SENTENCE_END_CHARS = set("。．｡！？!?」』）)】〉》”…‥")
 
+# Bump when the extractor starts producing richer sections, so books cached by an
+# older build are re-extracted instead of staying without their illustrations.
+#   1 = illustrations, table of contents and in-text links
+EXTRACTION_VERSION = 1
+
 
 def ensure_book_extracted_and_get_section(
     book_descriptor: Dict[str, Any], section_index: int = 0
@@ -81,13 +87,13 @@ def extract_book_into_cache(
     book_uuid = book_descriptor["book_uuid"]
     report = progress or (lambda *a, **k: None)
 
-    if is_book_extracted(book_uuid):
+    if is_book_extracted(book_uuid, EXTRACTION_VERSION):
         return
 
     report("waiting", 0, 0, "Waiting for the extraction queue...")
     with _EXTRACTION_LOCK:
         # Another request may have finished the same book while we waited.
-        if is_book_extracted(book_uuid):
+        if is_book_extracted(book_uuid, EXTRACTION_VERSION):
             return
 
         file_path_str = book_descriptor["file_path"]
@@ -103,12 +109,13 @@ def extract_book_into_cache(
 
         report("opening", 0, 0, f"Opening {file_path.name}...")
 
+        toc: List[Dict[str, Any]] = []
         if fmt == "PDF" or file_path.suffix.lower() == ".pdf":
             has_text, sections, all_sentences = _extract_pdf_full(
                 file_path, book_uuid, progress=report
             )
         else:
-            has_text, sections, all_sentences = _extract_epub_full(
+            has_text, sections, all_sentences, toc = _extract_epub_full(
                 file_path, book_uuid, progress=report
             )
 
@@ -124,20 +131,24 @@ def extract_book_into_cache(
             has_text_layer=has_text,
             sections=sections,
             sentences=all_sentences,
+            toc=toc,
+            extraction_version=EXTRACTION_VERSION,
         )
 
 
 def _extract_epub_full(
     epub_path: Path, book_uuid: str, progress: Optional[Callable[..., None]] = None
-) -> Tuple[bool, List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[bool, List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     report = progress or (lambda *a, **k: None)
     meta = extract_epub_metadata_and_spine(epub_path)
     chapters = meta["chapters"]
     sections: List[Dict[str, Any]] = []
     all_sentences: List[Dict[str, Any]] = []
     total_chapters = len(chapters)
+    href_to_section = {c["href"]: c["index"] for c in chapters}
 
     with zipfile.ZipFile(str(epub_path), "r") as zf:
+        zip_names = set(zf.namelist())
         for sec_idx, chap_info in enumerate(chapters):
             report(
                 "segmenting",
@@ -147,13 +158,30 @@ def _extract_epub_full(
             )
             raw_bytes = zf.read(chap_info["href"])
             html_str = _decode_html_bytes(raw_bytes)
-            raw_blocks = extract_normalized_blocks_from_html(html_str)
+            raw_blocks = extract_normalized_blocks_from_html(
+                html_str,
+                base_dir=posixpath.dirname(chap_info["href"]),
+                zip_names=zip_names,
+            )
             merged_blocks = _merge_soft_wrapped_blocks(raw_blocks)
 
             rendered_blocks: List[Dict[str, Any]] = []
             sent_counter = 0
 
             for b_idx, blk in enumerate(merged_blocks):
+                if blk.get("type") == "image":
+                    rendered_blocks.append(
+                        {
+                            "block_id": f"b{b_idx}",
+                            "type": "image",
+                            "style_class": "",
+                            "src": blk.get("src", ""),
+                            "alt": blk.get("alt", ""),
+                            "sentences": [],
+                        }
+                    )
+                    continue
+
                 sents = split_japanese_sentences(blk["text"])
                 if not sents:
                     continue
@@ -167,14 +195,16 @@ def _extract_epub_full(
                     all_sentences.append(analyzed)
                     block_sentences.append(analyzed)
 
-                rendered_blocks.append(
-                    {
-                        "block_id": f"b{b_idx}",
-                        "type": blk["type"],
-                        "style_class": blk.get("style_class", ""),
-                        "sentences": block_sentences,
-                    }
-                )
+                rendered = {
+                    "block_id": f"b{b_idx}",
+                    "type": blk["type"],
+                    "style_class": blk.get("style_class", ""),
+                    "sentences": block_sentences,
+                }
+                if blk.get("link_href"):
+                    rendered["link_href"] = blk["link_href"]
+                    rendered["link_target"] = href_to_section.get(blk["link_href"])
+                rendered_blocks.append(rendered)
 
             sections.append(
                 {
@@ -184,7 +214,7 @@ def _extract_epub_full(
                 }
             )
 
-    return len(all_sentences) > 0, sections, all_sentences
+    return len(all_sentences) > 0, sections, all_sentences, meta.get("toc", [])
 
 
 def _extract_pdf_full(
@@ -397,6 +427,7 @@ def extract_epub_metadata_and_spine(epub_path: Path) -> Dict[str, Any]:
         toc_titles = _extract_toc_titles(zf, root, opf_dir, manifest)
 
         chapters: List[Dict[str, Any]] = []
+        toc_context = (zf, root, opf_dir, manifest)
         spine_items = root.findall(".//{*}spine/{*}itemref")
         for idx, itemref in enumerate(spine_items):
             idref = itemref.attrib.get("idref", "")
@@ -417,25 +448,37 @@ def extract_epub_metadata_and_spine(epub_path: Path) -> Dict[str, Any]:
                 }
             )
 
+        href_to_section = {c["href"]: c["index"] for c in chapters}
+        try:
+            toc = build_toc_entries(*toc_context, href_to_section)
+        except Exception as exc:
+            print(f"[EPUB] table of contents unreadable: {exc}")
+            toc = []
+
     return {
         "title": title,
         "author": author,
         "chapters": chapters,
         "total_chapters": len(chapters),
+        "toc": toc,
     }
 
 
-def extract_normalized_blocks_from_html(html_str: str) -> List[Dict[str, str]]:
+def extract_normalized_blocks_from_html(
+    html_str: str, base_dir: str = "", zip_names: Optional[Set[str]] = None
+) -> List[Dict[str, str]]:
     """
-    Extracts paragraphs and headings from EPUB HTML while:
+    Extracts paragraphs, headings and illustrations from EPUB HTML while:
     1. Stripping <rt> and <rp> ruby furigana annotations so words are never split.
     2. Merging inline font/style tags (<span>, <font>, <b>, <em>) to keep sentences whole.
+    3. Emitting image blocks (<img> and <svg><image>) with their path inside the EPUB,
+       so illustrations survive instead of being thrown away with the markup.
+    4. Tagging a block that is essentially one link with its target, which is what
+       makes a book's own table-of-contents page clickable.
     """
     soup = BeautifulSoup(html_str, "lxml")
 
-    for unwanted in soup.find_all(
-        ["script", "style", "head", "rt", "rp", "svg", "img"]
-    ):
+    for unwanted in soup.find_all(["script", "style", "head", "rt", "rp"]):
         unwanted.decompose()
 
     body = soup.find("body") or soup
@@ -457,6 +500,35 @@ def extract_normalized_blocks_from_html(html_str: str) -> List[Dict[str, str]]:
 
         tag_name = node.name.lower() if node.name else ""
 
+        if tag_name in ("img", "image"):
+            src = _resolve_resource_href(node, base_dir, zip_names)
+            if src:
+                blocks.append(
+                    {
+                        "type": "image",
+                        "text": "",
+                        "style_class": "",
+                        "src": src,
+                        "alt": (node.get("alt") or "").strip(),
+                    }
+                )
+            return
+
+        if tag_name == "svg":
+            for img in node.find_all(["image", "img"]):
+                src = _resolve_resource_href(img, base_dir, zip_names)
+                if src:
+                    blocks.append(
+                        {
+                            "type": "image",
+                            "text": "",
+                            "style_class": "",
+                            "src": src,
+                            "alt": (img.get("alt") or "").strip(),
+                        }
+                    )
+            return
+
         has_child_blocks = any(
             isinstance(c, Tag)
             and (c.name.lower() in BLOCK_TAGS or c.name.lower() == "div")
@@ -469,20 +541,29 @@ def extract_normalized_blocks_from_html(html_str: str) -> List[Dict[str, str]]:
                 blocks.append(
                     {"type": tag_name, "text": text, "style_class": "heading"}
                 )
+                _tag_blocks_with_link(blocks, len(blocks) - 1, node, base_dir, text)
             return
 
         if tag_name in BLOCK_TAGS and not has_child_blocks:
             style_cls = _detect_typography_class(node)
             text = _extract_clean_inline_text(node)
+            inline_images = _collect_inline_images(node, base_dir, zip_names)
             if text.strip():
+                before_count = len(blocks)
                 _append_lines_as_blocks(blocks, text, "p", style_cls)
+                _tag_blocks_with_link(blocks, before_count, node, base_dir, text)
+            blocks.extend(inline_images)
             return
 
         if tag_name == "div" and not has_child_blocks:
             style_cls = _detect_typography_class(node)
             text = _extract_clean_inline_text(node)
+            inline_images = _collect_inline_images(node, base_dir, zip_names)
             if text.strip():
+                before_count = len(blocks)
                 _append_lines_as_blocks(blocks, text, "p", style_cls)
+                _tag_blocks_with_link(blocks, before_count, node, base_dir, text)
+            blocks.extend(inline_images)
             return
 
         inline_buf: List[str] = []
@@ -506,6 +587,100 @@ def extract_normalized_blocks_from_html(html_str: str) -> List[Dict[str, str]]:
 
     _walk(body)
     return blocks
+
+
+def _resolve_resource_href(
+    tag: Tag, base_dir: str, zip_names: Optional[Set[str]]
+) -> str:
+    """
+    Resolves an <img>/<image> reference to its actual entry inside the EPUB zip.
+
+    Returns "" when the target cannot be found, so a broken reference is dropped
+    rather than rendered as a missing image.
+    """
+    raw = (
+        tag.get("src")
+        or tag.get("href")
+        or tag.get("xlink:href")
+        or tag.get("{http://www.w3.org/1999/xlink}href")
+        or ""
+    ).strip()
+    if not raw or raw.startswith(("data:", "http://", "https://")):
+        return ""
+
+    raw = unquote(raw.split("#")[0])
+    candidate = posixpath.normpath(posixpath.join(base_dir, raw)) if base_dir else raw
+    candidate = candidate.lstrip("./")
+
+    if zip_names is None:
+        return candidate
+    if candidate in zip_names:
+        return candidate
+
+    # Some books reference images with paths that do not match the zip layout;
+    # fall back to a unique basename match before giving up.
+    basename = posixpath.basename(candidate)
+    matches = [n for n in zip_names if posixpath.basename(n) == basename]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _collect_inline_images(
+    node: Tag, base_dir: str, zip_names: Optional[Set[str]]
+) -> List[Dict[str, str]]:
+    """Image blocks for illustrations sitting inside a text block."""
+    found: List[Dict[str, str]] = []
+    for img in node.find_all(["img", "image"]):
+        src = _resolve_resource_href(img, base_dir, zip_names)
+        if src:
+            found.append(
+                {
+                    "type": "image",
+                    "text": "",
+                    "style_class": "",
+                    "src": src,
+                    "alt": (img.get("alt") or "").strip(),
+                }
+            )
+    return found
+
+
+def _tag_blocks_with_link(
+    blocks: List[Dict[str, str]],
+    start_index: int,
+    node: Tag,
+    base_dir: str,
+    text: str,
+) -> None:
+    """
+    Marks blocks that are essentially a single link with their target.
+
+    A table-of-contents entry is a short paragraph whose text is the anchor's text;
+    tagging those (and not every paragraph that happens to contain a link) is what
+    makes the book's own contents page navigable without turning prose into links.
+    """
+    anchors = node.find_all("a", href=True) if node.name != "a" else [node]
+    if len(anchors) != 1:
+        return
+
+    anchor = anchors[0]
+    anchor_text = anchor.get_text(strip=True)
+    if not anchor_text or len(anchor_text) < len(text.strip()) * 0.6:
+        return
+
+    href = unquote((anchor.get("href") or "").strip())
+    if not href or href.startswith(("http://", "https://", "mailto:")):
+        return
+
+    target, _, fragment = href.partition("#")
+    resolved = (
+        posixpath.normpath(posixpath.join(base_dir, target)).lstrip("./")
+        if target and base_dir
+        else target
+    )
+
+    for blk in blocks[start_index:]:
+        blk["link_href"] = resolved
+        blk["link_fragment"] = fragment
 
 
 def _extract_clean_inline_text(node: Any) -> str:
@@ -597,6 +772,104 @@ def _find_opf_path(zf: zipfile.ZipFile) -> str:
         if name.endswith(".opf"):
             return name
     raise ValueError("No .opf file found in EPUB archive.")
+
+
+def build_toc_entries(
+    zf: zipfile.ZipFile,
+    opf_root: ET.Element,
+    opf_dir: str,
+    manifest: Dict[str, Tuple[str, str]],
+    href_to_section: Dict[str, int],
+) -> List[Dict[str, Any]]:
+    """
+    The book's own table of contents, flattened with nesting depth, each entry
+    resolved to the spine section it points at so it can be jumped to directly.
+    """
+    entries: List[Dict[str, Any]] = []
+
+    def _add(title: str, raw_href: str, level: int) -> None:
+        title = (title or "").strip()
+        if not title:
+            return
+        target, _, fragment = unquote(raw_href or "").partition("#")
+        resolved = target
+        if target:
+            base = posixpath.dirname(raw_href_base[0])
+            resolved = (
+                posixpath.normpath(posixpath.join(base, target)).lstrip("./")
+                if base
+                else target
+            )
+        entries.append(
+            {
+                "title": title,
+                "href": resolved,
+                "fragment": fragment,
+                "level": level,
+                "section_index": href_to_section.get(resolved),
+            }
+        )
+
+    raw_href_base = [""]
+
+    # EPUB 2: toc.ncx
+    for _, (href, media_type) in manifest.items():
+        if not (href.endswith(".ncx") or "ncx" in media_type):
+            continue
+        try:
+            ncx_root = ET.fromstring(zf.read(href))
+        except Exception:
+            continue
+        raw_href_base[0] = href
+
+        def _walk_nav(parent: ET.Element, level: int) -> None:
+            for nav_point in parent.findall("./{*}navPoint"):
+                label = nav_point.find("./{*}navLabel/{*}text")
+                content = nav_point.find("./{*}content")
+                if label is not None and content is not None:
+                    _add(label.text or "", content.attrib.get("src", ""), level)
+                _walk_nav(nav_point, level + 1)
+
+        nav_map = ncx_root.find("./{*}navMap")
+        if nav_map is not None:
+            _walk_nav(nav_map, 0)
+        if entries:
+            return entries
+
+    # EPUB 3: nav document with epub:type="toc"
+    for _, (href, media_type) in manifest.items():
+        if "html" not in media_type and not href.endswith((".xhtml", ".html")):
+            continue
+        try:
+            soup = BeautifulSoup(_decode_html_bytes(zf.read(href)), "lxml")
+        except Exception:
+            continue
+        nav = None
+        for candidate in soup.find_all("nav"):
+            type_attr = (
+                candidate.get("epub:type") or candidate.get("type") or ""
+            ).lower()
+            if "toc" in type_attr:
+                nav = candidate
+                break
+        if nav is None:
+            continue
+        raw_href_base[0] = href
+
+        def _walk_list(list_tag: Any, level: int) -> None:
+            for li in list_tag.find_all("li", recursive=False):
+                anchor = li.find("a", href=True)
+                if anchor is not None:
+                    _add(anchor.get_text(strip=True), anchor["href"], level)
+                for sub in li.find_all(["ol", "ul"], recursive=False):
+                    _walk_list(sub, level + 1)
+
+        for root_list in nav.find_all(["ol", "ul"], recursive=False):
+            _walk_list(root_list, 0)
+        if entries:
+            return entries
+
+    return entries
 
 
 def _extract_toc_titles(

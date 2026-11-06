@@ -127,7 +127,9 @@ def _write_fake_calibre_db(db_path: Path, book_count: int = 120) -> None:
     conn.close()
 
 
-def _build_test_pdf(path: Path, scanned: bool = False) -> bool:
+def _build_test_pdf(
+    path: Path, scanned: bool = False, baked_header: bool = False
+) -> bool:
     """Writes a small Japanese PDF, optionally flattened to an image-only scan."""
     try:
         import pymupdf
@@ -155,6 +157,16 @@ def _build_test_pdf(path: Path, scanned: bool = False) -> bool:
         flat = pymupdf.open()
         flat_page = flat.new_page(width=page.rect.width, height=page.rect.height)
         flat_page.insert_image(flat_page.rect, pixmap=pix)
+        if baked_header:
+            # What a scanner leaves on the page: real characters, not the content.
+            flat_page.insert_text(
+                (40, 20), "Scanned by SuperScanner v4.2 - all rights reserved",
+                fontname="helv", fontsize=8,
+            )
+            flat_page.insert_text(
+                (40, 585), "chapter 1 - page 1 of 320 - do not distribute",
+                fontname="helv", fontsize=8,
+            )
         flat.save(str(path))
         flat.close()
     else:
@@ -168,7 +180,12 @@ def run_pdf_and_library_tests() -> None:
 
     from app import ocr as ocr_module
     from app.calibre_library import local_book_id_for
-    from app.pdf_layout import build_page_layout, get_pdf_info, pymupdf_available
+    from app.pdf_layout import (
+        MIN_TEXT_LAYER_CHARS,
+        build_page_layout,
+        get_pdf_info,
+        pymupdf_available,
+    )
 
     # 8. Regression: an upload must stay visible behind a large Calibre library.
     #    The listing used to be truncated to `limit` BEFORE sorting, and uploads were
@@ -234,6 +251,29 @@ def run_pdf_and_library_tests() -> None:
             f"[OK] PDF text layer -> {len(layout['words'])} positioned words "
             f"(図書館 at {[round(v, 3) for v in target['rects'][0]]})"
         )
+
+        # 9b. A scan is still a scan when the scanner baked a header into it.
+        #     Counting characters alone said "this page has a text layer", so OCR
+        #     was skipped and the reader got a handful of junk words instead of
+        #     the page. A full-page image with little text is a scan.
+        header_scan = Path(tmp) / "scan_with_header.pdf"
+        if _build_test_pdf(header_scan, scanned=True, baked_header=True):
+            header_layout = build_page_layout(
+                header_scan, 0, "test-pdf-header", book_title="header"
+            )
+            assert header_layout["text_layer_chars"] > MIN_TEXT_LAYER_CHARS, (
+                "fixture should carry more text than the bare threshold"
+            )
+            if ocr_module.is_available():
+                assert header_layout["source"] == "ocr", (
+                    f"a scan with a baked-in header was taken for a digital page "
+                    f"({header_layout['source']}, {header_layout['text_layer_chars']} chars)"
+                )
+                assert len(header_layout["words"]) > 20, header_layout["words"]
+                print(
+                    f"[OK] Scan with a {header_layout['text_layer_chars']}-char baked-in "
+                    f"header still routed to OCR ({len(header_layout['words'])} words)"
+                )
 
         # 10. OCR fallback for an image-only scan
         scan_path = Path(tmp) / "scan.pdf"

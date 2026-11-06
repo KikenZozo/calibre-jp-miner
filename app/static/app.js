@@ -496,7 +496,9 @@ async function loadChapter(bookId, chapterIndex, restoreScrollRatio = 0) {
     hideExtractionProgress();
     state.currentChapterIndex = data.chapter_index;
     state.chapterData = data;
-    state.sentencesMap = data.sentences || {};
+    // Built locally from the blocks: the server no longer ships the same tokens
+    // a second time as a sid -> sentence map.
+    state.sentencesMap = buildSentenceMap(data);
     if (Array.isArray(data.toc) && data.toc.length) state.toc = data.toc;
 
     populateChapterSelect(data.chapters || [], data.chapter_index);
@@ -628,6 +630,20 @@ function goToSection(delta) {
   const target = state.currentChapterIndex + delta;
   if (target < 0 || (total && target > total - 1)) return;
   loadChapter(state.currentBook.book_id, target);
+}
+
+/** Indexes the sentences already present in the section's blocks, by sid. */
+function buildSentenceMap(data) {
+  const map = data.sentences && Object.keys(data.sentences).length ? data.sentences : {};
+  if (Object.keys(map).length) return map;
+
+  const built = {};
+  for (const block of data.blocks || []) {
+    for (const sentence of block.sentences || []) {
+      if (sentence && sentence.sid) built[sentence.sid] = sentence;
+    }
+  }
+  return built;
 }
 
 function renderTokenizedChapter(data) {
@@ -973,9 +989,18 @@ async function loadPdfWordLayer(bookId, pageNumber, token, forceOcr) {
       badge.textContent = `🔍 OCR (${layout.ocr_lang}${
         layout.vertical ? ", vertical" : ""
       }) · ${layout.words.length} words`;
+    } else if (layout.source === "ocr-failed") {
+      // Say what actually went wrong rather than leaving "it does not work".
+      badge.textContent = "⚠️ OCR failed on this page";
+      setPdfMessage(
+        `<strong>OCR could not read this page.</strong><br/>${escapeHtml(
+          layout.ocr_reason || "No reason reported."
+        )}<br/><br/>The page itself is still displayed below.`
+      );
+      document.getElementById("pdf-stage").style.visibility = "visible";
     } else {
       badge.textContent = "⚠️ No text on this page";
-      if (!layout.ocr_available && layout.ocr_reason) {
+      if (layout.ocr_reason) {
         setPdfMessage(
           `<strong>This page is an image with no text layer, and OCR is unavailable.</strong><br/>${escapeHtml(
             layout.ocr_reason

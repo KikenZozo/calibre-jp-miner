@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -75,6 +76,11 @@ app = FastAPI(
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Section payloads are JSON full of repeated keys and Japanese text, which
+# compresses about 15x. Nothing in front of this app compresses by default, so a
+# chapter was going over the wire at full size.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 @app.middleware("http")
@@ -343,6 +349,8 @@ def api_get_chapter(book_id: str, chapter_index: int):
     book_uuid = book["book_uuid"]
 
     if is_book_extracted(book_uuid, EXTRACTION_VERSION):
+        # The sentence map duplicates every token already present in `blocks`;
+        # the reader rebuilds it locally instead of paying for it twice.
         section = get_cached_book_section(book_uuid, chapter_index)
         if section is not None:
             section["status"] = "ready"

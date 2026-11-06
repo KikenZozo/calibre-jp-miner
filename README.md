@@ -21,7 +21,7 @@ A self-hosted Japanese book extraction, `i+1` sentence mining, and interactive p
    * A slow Drive-backed book can no longer freeze the reader or outlive the reverse proxy's timeout.
 5. **Triple Mode UI (Zero Floating Popups)**
    * **Classic PDF Mode:** the original page rendered untouched by a vendored pdf.js, with an invisible pre-segmented word layer on top — Yomitan-style word scanning, except SudachiPy does the segmenting server-side so a tap selects a whole word *and* its whole sentence. Image-only scans get the same layer from Tesseract OCR, on demand, per page, cached permanently.
-   * **Interactive Reader Mode:** Pre-segmented words, fixed bottom inspector dock on click, context sentence with `<u>target</u>` underlined. Section navigation lives in a pinned toolbar (plus `←`/`→` keys and swipe) rather than only at the bottom of the chapter.
+   * **Interactive Reader Mode:** Pre-segmented words, fixed bottom inspector dock on click, context sentence with `<u>target</u>` underlined. Illustrations are kept and served straight from the EPUB. Section navigation lives in a pinned toolbar (plus `←`/`→` keys, swipe, a **📑 Contents** panel built from the book's NCX/nav, and the book's own contents page, whose links are clickable).
    * **Batch `i+1` Mode:** Diffs all sentences in a book against your known Anki vocabulary and ranks `i+1` sentences by BCCWJ/JPDB frequency rank and book occurrence count. For a scanned PDF, **📚 Index all** OCRs every page first so the whole book is diffed, not just the pages you opened.
 
 ---
@@ -38,6 +38,12 @@ ANKI_DECK_NAME=Data Mining
 AUTO_MINE_ON_CLICK=true
 AUTO_DOWNLOAD_JMDICT=true
 ```
+
+6. **Known-Vocabulary Colouring**
+   * Every word is tagged server-side as **known**, **mined**, **marked unknown** or **new**, so the browser never has to hold your whole vocabulary.
+   * Colouring is by exception: new words keep the normal reading colour with a light dotted underline, words you have acquired recede, and anything you flagged stands out — otherwise a fresh book would be highlighted end to end and nothing would be easier to spot.
+   * Click any word and press **✓ I know this** to recolour every occurrence instantly; press it again to mark it as *not* known.
+   * An explicit "not known" outranks Anki and the mining queue, so a later `Sync Known Words` never silently un-marks a word you decided you do not know.
 
 ---
 
@@ -76,8 +82,17 @@ DATA_DIR=./data python tests/test_pipeline.py
 
 The test suite covers sentence splitting, `<ruby>` stripping, JMdict lookup, `i+1`
 ranking, deterministic Anki GUIDs, the library-ordering regression (an upload must stay
-visible behind a large Calibre library), PDF text-layer word geometry, and the OCR
-fallback.
+visible behind a large Calibre library), PDF text-layer word geometry, the OCR fallback,
+illustration extraction, contents-page links, the NCX table of contents, stale-cache
+re-extraction, and the precedence rules for known / not-known words.
+
+### Re-extraction after an upgrade
+
+`EXTRACTION_VERSION` in `app/epub_parser.py` is bumped whenever the extractor starts
+producing richer sections. Books cached by an older build are then treated as *not*
+extracted and are rebuilt once, on first open, so an existing `mining.db` picks up
+illustrations and the table of contents without being deleted. `mining.db` is migrated
+in place at startup (`_migrate_schema`), so no manual step is needed.
 
 `app/static/vendor/pdfjs/` holds a pinned copy of pdf.js plus the CJK CMaps — see the
 README there for how to upgrade it.

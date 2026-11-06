@@ -1,8 +1,10 @@
 import base64
+import mimetypes
 import os
 import secrets
 import shutil
 import threading
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -35,6 +37,8 @@ from app.config import (
 )
 from app.database import (
     clear_pdf_page_layouts,
+    get_vocabulary_state,
+    set_word_known,
     count_cached_pdf_pages,
     delete_mined_card,
     get_all_cached_sentences_for_book,
@@ -51,10 +55,17 @@ from app.database import (
     upsert_known_words,
 )
 from app.dictionary import get_dictionary_stats, init_jmdict_db, lookup_word
+from app.epub_parser import EXTRACTION_VERSION
 from app.japanese_nlp import (
     build_underlined_sentence_html,
     find_i_plus_one_candidates,
     get_word_frequency_rank,
+)
+from app.pdf_cache import (
+    clear_cached_file,
+    ensure_cached_async,
+    get_copy_state,
+    resolve_readable_path,
 )
 from app.pdf_layout import build_page_layout, get_pdf_info, pymupdf_available
 
@@ -99,6 +110,18 @@ async def basic_auth_middleware(request: Request, call_next):
 def on_startup() -> None:
     init_app_db()
     init_jmdict_db()
+
+    # SudachiPy loads its dictionary lazily on the first tokenize() call, which used
+    # to add several seconds to whichever page the reader opened first.
+    def _warm_sudachi() -> None:
+        try:
+            from app.japanese_nlp import nlp_engine
+
+            nlp_engine.analyze_sentence("図書館へ行く。", "warmup")
+        except Exception as exc:
+            print(f"[Warmup] SudachiPy warmup skipped: {exc}")
+
+    threading.Thread(target=_warm_sudachi, name="sudachi-warmup", daemon=True).start()
 
     books = list_all_books()
     if not books:
@@ -178,6 +201,12 @@ class KnownWordsUploadRequest(BaseModel):
     source: str = "ankiconnect"
 
 
+class MarkWordKnownRequest(BaseModel):
+    lemma: str
+    known: bool = True
+    source: str = "manual"
+
+
 # --- Calibre Library & Extraction Endpoints ---
 
 
@@ -226,6 +255,52 @@ async def api_upload_book(file: UploadFile = File(...)) -> Dict[str, Any]:
     }
 
 
+def annotate_vocabulary_state(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Tags every word in a section (or PDF page) with how familiar it is, so the reader
+    can colour known / already-mined / new words without shipping the whole
+    vocabulary to the browser.
+
+    An explicit "not known" always wins, which is what lets you un-learn a word that
+    Anki or the mining queue would otherwise count as acquired.
+    """
+    state = get_vocabulary_state()
+    known, unknown, mined = state["known"], state["unknown"], state["mined"]
+
+    def _status(token: Dict[str, Any]) -> str:
+        lemma = token.get("base") or token.get("surface") or ""
+        if lemma in unknown:
+            return "unknown"
+        if lemma in known:
+            return "known"
+        if lemma in mined:
+            return "mined"
+        return "new"
+
+    def _tag_tokens(tokens: List[Dict[str, Any]]) -> None:
+        for token in tokens:
+            if token.get("is_word"):
+                token["vocab_state"] = _status(token)
+
+    for block in payload.get("blocks", []) or []:
+        for sentence in block.get("sentences", []) or []:
+            _tag_tokens(sentence.get("tokens", []) or [])
+
+    for sentence in (payload.get("sentences") or {}).values():
+        if isinstance(sentence, dict):
+            _tag_tokens(sentence.get("tokens", []) or [])
+
+    for word in payload.get("words", []) or []:
+        word["vocab_state"] = _status(word)
+
+    payload["vocab_counts"] = {
+        "known": len(known),
+        "mined": len(mined),
+        "marked_unknown": len(unknown),
+    }
+    return payload
+
+
 def _require_book(book_id: str) -> Dict[str, Any]:
     book = get_book_descriptor(book_id)
     if not book:
@@ -248,7 +323,7 @@ def api_extraction_status(book_id: str) -> Dict[str, Any]:
     """Progress of the background extraction, polled by the reader while it waits."""
     book = _require_book(book_id)
     job = extraction_jobs.get_job(book["book_uuid"])
-    extracted = is_book_extracted(book["book_uuid"])
+    extracted = is_book_extracted(book["book_uuid"], EXTRACTION_VERSION)
     return {
         "book_id": book["book_uuid"],
         "is_extracted": extracted,
@@ -267,10 +342,11 @@ def api_get_chapter(book_id: str, chapter_index: int):
     book = _require_book(book_id)
     book_uuid = book["book_uuid"]
 
-    if is_book_extracted(book_uuid):
+    if is_book_extracted(book_uuid, EXTRACTION_VERSION):
         section = get_cached_book_section(book_uuid, chapter_index)
         if section is not None:
             section["status"] = "ready"
+            annotate_vocabulary_state(section)
             return section
 
     job = extraction_jobs.get_job(book_uuid)
@@ -286,14 +362,86 @@ def api_get_chapter(book_id: str, chapter_index: int):
     return JSONResponse(status_code=202, content=_job_payload(book))
 
 
+@app.get("/api/books/{book_id}/resource")
+def api_get_book_resource(book_id: str, path: str):
+    """
+    Serves one file from inside an EPUB (illustrations, cover art).
+
+    `path` is only ever used to look up an entry in the book's own zip index, never
+    to touch the filesystem, so it cannot escape the book.
+    """
+    book = _require_book(book_id)
+    if (book.get("preferred_format") or "").upper() != "EPUB":
+        raise HTTPException(status_code=400, detail="This book is not an EPUB.")
+
+    epub_path = Path(book["file_path"])
+    if not epub_path.exists():
+        raise HTTPException(status_code=404, detail="Book file not reachable.")
+
+    try:
+        with zipfile.ZipFile(str(epub_path), "r") as zf:
+            if path not in set(zf.namelist()):
+                raise HTTPException(status_code=404, detail="Resource not in this book.")
+            data = zf.read(path)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read resource: {exc}")
+
+    media_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    if not media_type.startswith(("image/", "font/")) and media_type not in (
+        "application/font-woff",
+        "application/vnd.ms-opentype",
+    ):
+        # Only media assets are served; markup is delivered as parsed sections.
+        raise HTTPException(status_code=415, detail="Only images are served.")
+
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+# --- Known Vocabulary Colouring ---
+
+
+@app.post("/api/known-words/mark")
+def api_mark_word_known(req: MarkWordKnownRequest) -> Dict[str, Any]:
+    """Records that you do (or do not) know a word, which drives its colour."""
+    set_word_known(req.lemma, req.known, source=req.source)
+    return {
+        "status": "ok",
+        "lemma": req.lemma,
+        "known": req.known,
+        "known_words_count": get_known_words_count(),
+    }
+
+
+@app.get("/api/known-words/state")
+def api_vocabulary_state() -> Dict[str, Any]:
+    state = get_vocabulary_state()
+    return {
+        "known": len(state["known"]),
+        "mined": len(state["mined"]),
+        "marked_unknown": len(state["unknown"]),
+    }
+
+
 # --- Classic PDF View (original rendering + clickable word overlay) ---
 
 
 @app.get("/api/books/{book_id}/file")
 def api_get_book_file(book_id: str):
-    """Streams the original file so pdf.js can render the PDF exactly as it is."""
+    """
+    Streams the original file so pdf.js can render the PDF exactly as it is.
+
+    Starlette answers Range requests here, which is what lets pdf.js fetch only the
+    bytes for the page on screen instead of the whole book. Drive-backed PDFs are
+    served from the local copy once it exists, so those ranges hit local disk.
+    """
     book = _require_book(book_id)
-    path = Path(book["file_path"])
+    path = resolve_readable_path(book)
     if not path.exists():
         raise HTTPException(
             status_code=404,
@@ -304,7 +452,16 @@ def api_get_book_file(book_id: str):
         if book.get("preferred_format", "").upper() == "PDF"
         else "application/epub+zip"
     )
-    return FileResponse(str(path), media_type=media_type, filename=path.name)
+    return FileResponse(
+        str(path),
+        media_type=media_type,
+        filename=Path(book["file_path"]).name,
+        headers={
+            # The bytes of a given book never change, so let the browser keep them.
+            "Cache-Control": "private, max-age=86400",
+            "Accept-Ranges": "bytes",
+        },
+    )
 
 
 @app.get("/api/books/{book_id}/pdf/info")
@@ -315,17 +472,18 @@ def api_pdf_info(book_id: str) -> Dict[str, Any]:
     if not pymupdf_available():
         raise HTTPException(status_code=500, detail="PyMuPDF is not installed.")
 
-    path = Path(book["file_path"])
+    path = resolve_readable_path(book)
     if not path.exists():
         raise HTTPException(status_code=404, detail="PDF file not reachable.")
 
-    info = get_pdf_info(path)
+    info = get_pdf_info(path, book_uuid=book["book_uuid"])
     info.update(
         {
             "book_id": book["book_uuid"],
             "book_title": book.get("title", ""),
             "ocr": ocr_module.ocr_status(),
             "cached_pages": count_cached_pdf_pages(book["book_uuid"]),
+            "local_copy": get_copy_state(book["book_uuid"]) or {},
         }
     )
     return info
@@ -341,18 +499,19 @@ def api_pdf_page(book_id: str, page_number: int, force_ocr: bool = False) -> Dic
     if book.get("preferred_format", "").upper() != "PDF":
         raise HTTPException(status_code=400, detail="This book is not a PDF.")
 
-    path = Path(book["file_path"])
+    path = resolve_readable_path(book)
     if not path.exists():
         raise HTTPException(status_code=404, detail="PDF file not reachable.")
 
     try:
-        return build_page_layout(
+        layout = build_page_layout(
             pdf_path=path,
             page_number=max(0, page_number),
             book_uuid=book["book_uuid"],
             force_ocr=force_ocr,
             book_title=book.get("title", ""),
         )
+        return annotate_vocabulary_state(layout)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"PDF page analysis failed: {exc}")
 
@@ -378,7 +537,11 @@ def api_pdf_analyze_all(book_id: str, force_ocr: bool = False) -> Dict[str, Any]
 @app.delete("/api/books/{book_id}/pdf/cache")
 def api_clear_pdf_cache(book_id: str) -> Dict[str, Any]:
     book = _require_book(book_id)
-    return {"status": "ok", "deleted_pages": clear_pdf_page_layouts(book["book_uuid"])}
+    return {
+        "status": "ok",
+        "deleted_pages": clear_pdf_page_layouts(book["book_uuid"]),
+        "deleted_local_copy": clear_cached_file(book["book_uuid"]),
+    }
 
 
 @app.get("/api/ocr/status")
@@ -396,7 +559,7 @@ def api_get_book_i_plus_one_candidates(book_id: str, limit: int = 80):
     """
     book = _require_book(book_id)
 
-    if not is_book_extracted(book["book_uuid"]):
+    if not is_book_extracted(book["book_uuid"], EXTRACTION_VERSION):
         job = extraction_jobs.get_job(book["book_uuid"])
         if job and job["status"] == extraction_jobs.STATUS_ERROR:
             extraction_jobs.clear_job(book["book_uuid"])

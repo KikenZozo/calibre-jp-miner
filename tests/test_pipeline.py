@@ -1,11 +1,12 @@
 import sys
+import zipfile
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from app.anki_service import create_and_push_anki_card, export_cards_to_apkg, export_cards_to_tsv
-from app.database import init_app_db, upsert_known_words
+from app.database import init_app_db, is_book_extracted, upsert_known_words
 from app.dictionary import init_jmdict_db, lookup_word
 from app.epub_parser import parse_epub_chapter_tokenized
 from app.japanese_nlp import (
@@ -264,6 +265,157 @@ def run_pdf_and_library_tests() -> None:
             print(f"[SKIP] Tesseract unavailable: {scan_layout['ocr_reason']}")
 
 
+def _build_illustrated_epub(path: Path) -> None:
+    """An EPUB with illustrations, a contents page of links, and an NCX."""
+    import struct
+    import zipfile
+    import zlib
+
+    def png(w: int, h: int) -> bytes:
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            body = tag + data
+            return (
+                struct.pack(">I", len(data))
+                + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+            )
+
+        raw = b"".join(b"\x00" + bytes((200, 120, 60)) * w for _ in range(h))
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b"")
+        )
+
+    chapter = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>第一章</title></head>
+<body><h1>第一章</h1>
+<p>　彼は静かに古い図書館の重い扉を開けて、深い影の中へと足を踏み入れた。</p>
+<div><img src="../images/plate1.png" alt="挿絵"/></div>
+<p>　窓から優しい光が落ちて、机の上には一冊の新しい物語の本が置かれていた。</p>
+</body></html>"""
+
+    toc_page = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>目次</title></head>
+<body><h1>目次</h1><p><a href="chapter1.xhtml">第一章：古い扉</a></p></body></html>"""
+
+    opf = """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="2.0">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>挿絵テスト</dc:title>
+<dc:creator>テスト</dc:creator><dc:language>ja</dc:language>
+<dc:identifier id="BookId">urn:uuid:illus-test</dc:identifier></metadata>
+<manifest>
+<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+<item id="tocpage" href="text/toc_page.xhtml" media-type="application/xhtml+xml"/>
+<item id="c1" href="text/chapter1.xhtml" media-type="application/xhtml+xml"/>
+<item id="img1" href="images/plate1.png" media-type="image/png"/>
+</manifest>
+<spine toc="ncx"><itemref idref="tocpage"/><itemref idref="c1"/></spine></package>"""
+
+    ncx = """<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head/>
+<docTitle><text>挿絵テスト</text></docTitle><navMap>
+<navPoint id="n0" playOrder="1"><navLabel><text>目次</text></navLabel><content src="text/toc_page.xhtml"/></navPoint>
+<navPoint id="n1" playOrder="2"><navLabel><text>第一章</text></navLabel><content src="text/chapter1.xhtml"/></navPoint>
+</navMap></ncx>"""
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container version="1.0" '
+            'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+            '<rootfile full-path="OEBPS/content.opf" '
+            'media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        zf.writestr("OEBPS/content.opf", opf)
+        zf.writestr("OEBPS/toc.ncx", ncx)
+        zf.writestr("OEBPS/text/toc_page.xhtml", toc_page)
+        zf.writestr("OEBPS/text/chapter1.xhtml", chapter)
+        zf.writestr("OEBPS/images/plate1.png", png(8, 6))
+
+
+def run_illustration_toc_and_vocabulary_tests() -> None:
+    import tempfile
+
+    from app.database import (
+        get_cached_book_section,
+        get_vocabulary_state,
+        set_word_known,
+        upsert_known_words,
+    )
+    from app.epub_parser import EXTRACTION_VERSION, extract_book_into_cache
+
+    with tempfile.TemporaryDirectory() as tmp:
+        epub_path = Path(tmp) / "illustrated.epub"
+        _build_illustrated_epub(epub_path)
+
+        book = {
+            "book_uuid": "test-illustrated",
+            "file_path": str(epub_path),
+            "preferred_format": "EPUB",
+            "title": "挿絵テスト",
+            "author": "テスト",
+            "calibre_id": 0,
+            "uncompressed_size": epub_path.stat().st_size,
+        }
+        extract_book_into_cache(book)
+
+        # 11. Illustrations survive extraction instead of being stripped with the markup
+        chapter = get_cached_book_section("test-illustrated", 1)
+        assert chapter is not None
+        image_blocks = [b for b in chapter["blocks"] if b["type"] == "image"]
+        assert image_blocks, "illustration was dropped during extraction"
+        assert image_blocks[0]["src"] == "OEBPS/images/plate1.png", image_blocks[0]["src"]
+        assert image_blocks[0]["alt"] == "挿絵"
+        with zipfile.ZipFile(epub_path) as zf:
+            assert image_blocks[0]["src"] in zf.namelist(), "image path is not in the EPUB"
+        print(f"[OK] Illustration kept and resolvable: {image_blocks[0]['src']}")
+
+        # text around the image is still segmented
+        text_blocks = [b for b in chapter["blocks"] if b.get("sentences")]
+        assert len(text_blocks) >= 2, "text around the illustration was lost"
+
+        # 12. The book's own contents page is clickable
+        toc_page = get_cached_book_section("test-illustrated", 0)
+        linked = [b for b in toc_page["blocks"] if b.get("link_href")]
+        assert linked, "contents-page link was not detected"
+        assert linked[0]["link_href"] == "OEBPS/text/chapter1.xhtml"
+        assert linked[0]["link_target"] == 1, linked[0]["link_target"]
+        print(f"[OK] Contents link resolves to section {linked[0]['link_target']}")
+
+        # 13. The NCX table of contents is parsed and addressable
+        toc = chapter["toc"]
+        assert len(toc) == 2, toc
+        assert [t["title"] for t in toc] == ["目次", "第一章"]
+        assert [t["section_index"] for t in toc] == [0, 1], toc
+        print(f"[OK] Table of contents: {len(toc)} entries resolved to sections")
+
+        # 14. A cache written by an older extractor is treated as stale
+        assert is_book_extracted("test-illustrated", EXTRACTION_VERSION)
+        assert not is_book_extracted("test-illustrated", EXTRACTION_VERSION + 1), (
+            "a stale cache must be re-extracted, not served as-is"
+        )
+        print("[OK] Stale extraction cache is re-extracted rather than served")
+
+    # 15. Vocabulary states, and the precedence between them
+    set_word_known("図書館", True)
+    set_word_known("物語", False)
+    upsert_known_words(["物語", "窓"], source="anki")  # an Anki sync must not override
+
+    state = get_vocabulary_state()
+    assert "図書館" in state["known"]
+    assert "窓" in state["known"]
+    assert "物語" in state["unknown"], "explicit 'not known' was overwritten by Anki"
+    assert "物語" not in state["known"]
+
+    set_word_known("物語", True)
+    assert "物語" in get_vocabulary_state()["known"], "a word could not be re-marked known"
+    print("[OK] Known / not-known marking survives an Anki sync and is reversible")
+
+
 if __name__ == "__main__":
     run_tests()
     run_pdf_and_library_tests()
+    run_illustration_toc_and_vocabulary_tests()

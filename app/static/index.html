@@ -95,6 +95,9 @@
             <label class="toolbar-check" title="Show the detected word boxes">
               <input type="checkbox" id="chk-show-boxes" /> <span>Boxes</span>
             </label>
+            <label class="toolbar-check" title="Colour words by how well you know them">
+              <input type="checkbox" id="chk-color-vocab-pdf" checked /> <span>🎨</span>
+            </label>
           </div>
         </div>
 
@@ -116,14 +119,28 @@
             <select id="select-chapter" aria-label="Section"></select>
             <button id="btn-next-chap" class="nav-pill" title="Next section (→)">›</button>
           </div>
+          <div class="toolbar-group">
+            <button id="btn-open-toc" class="btn-ghost" title="Table of contents">📑 <span class="hide-sm">Contents</span></button>
+          </div>
           <div class="toolbar-group toolbar-grow">
             <span id="lbl-section-position" class="toolbar-position"></span>
           </div>
           <div class="toolbar-group">
+            <label class="toolbar-check" title="Colour words by how well you know them">
+              <input type="checkbox" id="chk-color-vocab" checked /> <span>🎨 Colours</span>
+            </label>
             <label class="toolbar-check" title="Automatically create an Anki card when clicking a word">
               <input type="checkbox" id="chk-auto-mine" checked /> <span>⚡ Auto-Anki</span>
             </label>
           </div>
+        </div>
+
+        <div id="vocab-legend" class="vocab-legend">
+          <span class="legend-item"><i class="swatch v-new"></i>New</span>
+          <span class="legend-item"><i class="swatch v-mined"></i>Mined</span>
+          <span class="legend-item"><i class="swatch v-known"></i>Known</span>
+          <span class="legend-item"><i class="swatch v-unknown"></i>Marked unknown</span>
+          <span class="legend-hint">Click a word, then “I know this” to recolour every occurrence.</span>
         </div>
 
         <div id="reader-viewport">
@@ -185,6 +202,9 @@
             </div>
 
             <div class="inspector-actions">
+              <button id="btn-toggle-known" class="btn-known" title="Mark this word as known or not known">
+                ✓ I know this
+              </button>
               <span id="insp-anki-status" class="anki-status-pill"></span>
               <button id="btn-manual-mine" class="btn-mine-now hidden">➕ Mine to Anki</button>
               <button id="btn-close-inspector" class="btn-close-dock" title="Close Panel">✕</button>
@@ -225,6 +245,19 @@
         </div>
 
         <div id="mined-cards-list" class="mined-cards-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: Table of Contents -->
+  <div id="modal-toc" class="modal-backdrop hidden">
+    <div class="modal-panel">
+      <div class="modal-header">
+        <h2>📑 Contents</h2>
+        <button id="btn-close-toc" class="btn-close-dock">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="toc-list" class="toc-list"></div>
       </div>
     </div>
   </div>

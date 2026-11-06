@@ -181,8 +181,31 @@ def init_app_db() -> None:
             "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, str(v))
         )
 
+    _migrate_schema(cur)
+
     conn.commit()
     conn.close()
+
+
+def _migrate_schema(cur: sqlite3.Cursor) -> None:
+    """Adds columns introduced after the first release, for existing mining.db files."""
+    additions = {
+        "books_cache": {
+            # Bumped when the extractor starts producing richer sections (images,
+            # table of contents), so already-cached books are re-extracted instead
+            # of staying stuck on the older, poorer output.
+            "extraction_version": "INTEGER DEFAULT 0",
+            "toc_json": "TEXT DEFAULT '[]'",
+        },
+        "known_vocabulary": {
+            "is_known": "INTEGER DEFAULT 1",
+        },
+    }
+    for table, columns in additions.items():
+        existing = {r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+        for name, spec in columns.items():
+            if name not in existing:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {name} {spec}")
 
 
 def get_settings() -> Dict[str, Any]:
@@ -223,13 +246,20 @@ def update_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
 # --- Permanent Book Extraction Cache Operations ---
 
 
-def is_book_extracted(book_uuid: str) -> bool:
+def is_book_extracted(book_uuid: str, min_version: int = 0) -> bool:
+    """
+    True when the book is cached AND was produced by a recent enough extractor.
+    A stale cache (missing images or the table of contents) is treated as absent so
+    the book is re-extracted once, rather than staying degraded forever.
+    """
     conn = get_db_connection()
     row = conn.execute(
-        "SELECT 1 FROM books_cache WHERE book_uuid = ?", (book_uuid,)
+        "SELECT extraction_version FROM books_cache WHERE book_uuid = ?", (book_uuid,)
     ).fetchone()
     conn.close()
-    return row is not None
+    if row is None:
+        return False
+    return int(row["extraction_version"] or 0) >= min_version
 
 
 def get_cached_books_map() -> Dict[str, Dict[str, Any]]:
@@ -250,6 +280,8 @@ def store_extracted_book(
     has_text_layer: bool,
     sections: List[Dict[str, Any]],
     sentences: List[Dict[str, Any]],
+    toc: Optional[List[Dict[str, Any]]] = None,
+    extraction_version: int = 0,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     conn = get_db_connection()
@@ -263,8 +295,9 @@ def store_extracted_book(
         INSERT OR REPLACE INTO books_cache (
             book_uuid, calibre_id, title, author, source_format,
             uncompressed_size, is_symlink, has_text_layer,
-            total_sections, total_sentences, extracted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            total_sections, total_sentences, extracted_at,
+            extraction_version, toc_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             book_uuid,
@@ -278,6 +311,8 @@ def store_extracted_book(
             len(sections),
             len(sentences),
             now,
+            extraction_version,
+            json.dumps(toc or [], ensure_ascii=False),
         ),
     )
 
@@ -395,6 +430,11 @@ def get_cached_book_section(
         {"index": r["section_index"], "title": r["section_title"]} for r in all_secs
     ]
 
+    try:
+        toc = json.loads(book_meta["toc_json"] or "[]")
+    except Exception:
+        toc = []
+
     return {
         "book_id": book_uuid,
         "book_uuid": book_uuid,
@@ -406,6 +446,7 @@ def get_cached_book_section(
         "chapter_title": sec_row["section_title"] if sec_row else f"Section {section_index + 1}",
         "total_chapters": len(chapters_list),
         "chapters": chapters_list,
+        "toc": toc,
         "blocks": blocks,
         "sentences": sentences_map,
     }
@@ -482,7 +523,8 @@ def store_pdf_page_layout(
 def count_cached_pdf_pages(book_uuid: str) -> Dict[str, Any]:
     conn = get_db_connection()
     rows = conn.execute(
-        "SELECT source, COUNT(*) AS n FROM pdf_page_layout WHERE book_uuid = ? GROUP BY source",
+        "SELECT source, COUNT(*) AS n FROM pdf_page_layout "
+        "WHERE book_uuid = ? AND page_number >= 0 GROUP BY source",
         (book_uuid,),
     ).fetchall()
     conn.close()
@@ -500,6 +542,26 @@ def clear_pdf_page_layouts(book_uuid: str) -> int:
     deleted = cur.rowcount
     conn.close()
     return deleted
+
+
+def get_cached_pdf_info(book_uuid: str) -> Optional[Dict[str, Any]]:
+    """Cached page count / text-layer probe (page_number -1 is the per-book row)."""
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT payload_json FROM pdf_page_layout WHERE book_uuid = ? AND page_number = -1",
+        (book_uuid,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        return json.loads(row["payload_json"])
+    except Exception:
+        return None
+
+
+def store_pdf_info(book_uuid: str, info: Dict[str, Any]) -> None:
+    store_pdf_page_layout(book_uuid, -1, "info", info)
 
 
 def store_section_sentences(
@@ -589,10 +651,15 @@ def upsert_known_words(words: List[str], source: str = "anki_snapshot") -> int:
     conn = get_db_connection()
     cur = conn.cursor()
     rows = [(w.strip(), source, now) for w in words if w and w.strip()]
+    # ON CONFLICT ... DO UPDATE (not INSERT OR REPLACE) so an explicit
+    # "I do not know this word" is not silently undone by the next Anki sync.
     cur.executemany(
         """
-        INSERT OR REPLACE INTO known_vocabulary (lemma, source, updated_at)
-        VALUES (?, ?, ?)
+        INSERT INTO known_vocabulary (lemma, source, updated_at, is_known)
+        VALUES (?, ?, ?, 1)
+        ON CONFLICT(lemma) DO UPDATE SET
+            source = excluded.source,
+            updated_at = excluded.updated_at
         """,
         rows,
     )
@@ -603,8 +670,11 @@ def upsert_known_words(words: List[str], source: str = "anki_snapshot") -> int:
 
 
 def get_known_words_set() -> Set[str]:
+    """Everything the reader counts as already acquired: known + already mined."""
     conn = get_db_connection()
-    rows = conn.execute("SELECT lemma FROM known_vocabulary").fetchall()
+    rows = conn.execute(
+        "SELECT lemma FROM known_vocabulary WHERE COALESCE(is_known, 1) = 1"
+    ).fetchall()
     mined_rows = conn.execute("SELECT DISTINCT word_base FROM mining_queue").fetchall()
     conn.close()
     known = {r["lemma"] for r in rows}
@@ -612,9 +682,60 @@ def get_known_words_set() -> Set[str]:
     return known
 
 
+def get_vocabulary_state() -> Dict[str, Set[str]]:
+    """
+    The three states the reader colours words with:
+      known     - marked known by you, or imported from Anki
+      mined     - already encountered and queued/synced as a card
+      unknown   - explicitly marked as NOT known, which overrides the others
+    Anything in none of these is new.
+    """
+    conn = get_db_connection()
+    known_rows = conn.execute(
+        "SELECT lemma, COALESCE(is_known, 1) AS is_known FROM known_vocabulary"
+    ).fetchall()
+    mined_rows = conn.execute("SELECT DISTINCT word_base FROM mining_queue").fetchall()
+    conn.close()
+
+    return {
+        "known": {r["lemma"] for r in known_rows if r["is_known"]},
+        "unknown": {r["lemma"] for r in known_rows if not r["is_known"]},
+        "mined": {r["word_base"] for r in mined_rows if r["word_base"]},
+    }
+
+
+def set_word_known(lemma: str, known: bool, source: str = "manual") -> None:
+    """
+    Records an explicit decision about one word.
+
+    `known=False` is stored rather than deleted so it can override a word that Anki
+    or the mining queue would otherwise mark as acquired.
+    """
+    lemma = (lemma or "").strip()
+    if not lemma:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    conn.execute(
+        """
+        INSERT INTO known_vocabulary (lemma, source, updated_at, is_known)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(lemma) DO UPDATE SET
+            is_known = excluded.is_known,
+            source = excluded.source,
+            updated_at = excluded.updated_at
+        """,
+        (lemma, source, now, 1 if known else 0),
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_known_words_count() -> int:
     conn = get_db_connection()
-    cnt = conn.execute("SELECT COUNT(*) FROM known_vocabulary").fetchone()[0]
+    cnt = conn.execute(
+        "SELECT COUNT(*) FROM known_vocabulary WHERE COALESCE(is_known, 1) = 1"
+    ).fetchone()[0]
     conn.close()
     return cnt
 

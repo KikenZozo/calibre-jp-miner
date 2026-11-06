@@ -87,6 +87,20 @@ def init_app_db() -> None:
         "CREATE INDEX IF NOT EXISTS idx_sentences_book_sec ON book_sentences(book_uuid, section_index)"
     )
 
+    # Per-page clickable word geometry for the classic PDF view (text layer or OCR)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pdf_page_layout (
+            book_uuid TEXT NOT NULL,
+            page_number INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (book_uuid, page_number)
+        )
+        """
+    )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS reading_progress (
@@ -344,7 +358,12 @@ def get_cached_book_section(
             "sentences": {},
         }
 
-    section_index = max(0, min(section_index, len(all_secs) - 1))
+    # Sections are dense for an EPUB (0..n-1) but can be sparse for a PDF whose
+    # pages were OCR'd on demand, so resolve the request against what exists.
+    available = [r["section_index"] for r in all_secs]
+    if section_index not in available:
+        section_index = available[max(0, min(section_index, len(available) - 1))]
+
     sec_row = conn.execute(
         """
         SELECT * FROM book_sections
@@ -420,6 +439,146 @@ def get_all_cached_sentences_for_book(book_uuid: str) -> List[Dict[str, Any]]:
             }
         )
     return result
+
+
+
+# --- PDF Page Layout Cache (classic PDF view / OCR) ---
+
+
+def get_cached_pdf_page_layout(
+    book_uuid: str, page_number: int
+) -> Optional[Dict[str, Any]]:
+    conn = get_db_connection()
+    row = conn.execute(
+        "SELECT payload_json FROM pdf_page_layout WHERE book_uuid = ? AND page_number = ?",
+        (book_uuid, page_number),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        return json.loads(row["payload_json"])
+    except Exception:
+        return None
+
+
+def store_pdf_page_layout(
+    book_uuid: str, page_number: int, source: str, payload: Dict[str, Any]
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO pdf_page_layout
+        (book_uuid, page_number, source, payload_json, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (book_uuid, page_number, source, json.dumps(payload, ensure_ascii=False), now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def count_cached_pdf_pages(book_uuid: str) -> Dict[str, Any]:
+    conn = get_db_connection()
+    rows = conn.execute(
+        "SELECT source, COUNT(*) AS n FROM pdf_page_layout WHERE book_uuid = ? GROUP BY source",
+        (book_uuid,),
+    ).fetchall()
+    conn.close()
+    by_source = {r["source"]: r["n"] for r in rows}
+    return {
+        "total": sum(by_source.values()),
+        "by_source": by_source,
+    }
+
+
+def clear_pdf_page_layouts(book_uuid: str) -> int:
+    conn = get_db_connection()
+    cur = conn.execute("DELETE FROM pdf_page_layout WHERE book_uuid = ?", (book_uuid,))
+    conn.commit()
+    deleted = cur.rowcount
+    conn.close()
+    return deleted
+
+
+def store_section_sentences(
+    book_uuid: str,
+    section_index: int,
+    section_title: str,
+    sentences: List[Dict[str, Any]],
+    book_title: str = "",
+    source_format: str = "PDF",
+) -> None:
+    """
+    Registers one lazily-produced section (a PDF page) so batch i+1 mining and the
+    library cache badge see OCR'd or on-demand content without a full extraction.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        "INSERT OR IGNORE INTO books_cache (book_uuid, calibre_id, title, author, source_format, extracted_at) "
+        "VALUES (?, 0, ?, '', ?, ?)",
+        (book_uuid, book_title or book_uuid, source_format, now),
+    )
+
+    # One renderable block per section so the reflowed reader can display an
+    # OCR'd page, not just the batch i+1 tab.
+    blocks = (
+        [
+            {
+                "block_id": "b0",
+                "type": "p",
+                "style_class": "",
+                "sentences": sentences,
+            }
+        ]
+        if sentences
+        else []
+    )
+    cur.execute(
+        "INSERT OR REPLACE INTO book_sections (book_uuid, section_index, section_title, blocks_json) "
+        "VALUES (?, ?, ?, ?)",
+        (book_uuid, section_index, section_title, json.dumps(blocks, ensure_ascii=False)),
+    )
+
+    cur.execute(
+        "DELETE FROM book_sentences WHERE book_uuid = ? AND section_index = ?",
+        (book_uuid, section_index),
+    )
+    cur.executemany(
+        """
+        INSERT OR REPLACE INTO book_sentences (
+            sentence_id, book_uuid, section_index, sentence_index, text_plain, tokens_json
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                s["sid"],
+                book_uuid,
+                section_index,
+                s.get("sentence_index", idx),
+                s.get("text", ""),
+                json.dumps(s.get("tokens", []), ensure_ascii=False),
+            )
+            for idx, s in enumerate(sentences)
+        ],
+    )
+
+    totals = cur.execute(
+        "SELECT COUNT(DISTINCT section_index) AS secs, COUNT(*) AS sents "
+        "FROM book_sentences WHERE book_uuid = ?",
+        (book_uuid,),
+    ).fetchone()
+    cur.execute(
+        "UPDATE books_cache SET total_sections = ?, total_sentences = ? WHERE book_uuid = ?",
+        (totals["secs"], totals["sents"], book_uuid),
+    )
+
+    conn.commit()
+    conn.close()
 
 
 # --- Known Vocabulary Operations ---

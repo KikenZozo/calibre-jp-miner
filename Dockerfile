@@ -2,12 +2,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies required for lxml, SudachiPy, and healthcheck
+# System dependencies for lxml, SudachiPy, the healthcheck, and Japanese OCR.
+# tesseract-ocr-jpn / -jpn-vert give scanned PDFs a text layer on demand
+# (horizontal and tategaki); drop them if you never read image-only scans.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libxml2-dev \
     libxslt1-dev \
     curl \
+    tesseract-ocr \
+    tesseract-ocr-jpn \
+    tesseract-ocr-jpn-vert \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -24,6 +29,7 @@ ENV ANKI_COLLECTION_PATH=/anki_data/enzo/collection.anki2
 ENV ANKI_DECK_NAME="Data Mining"
 ENV AUTO_MINE_ON_CLICK="true"
 ENV AUTO_DOWNLOAD_JMDICT="true"
+ENV OCR_DPI=300
 
 EXPOSE 8085
 

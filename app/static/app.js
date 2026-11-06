@@ -496,7 +496,9 @@ async function loadChapter(bookId, chapterIndex, restoreScrollRatio = 0) {
     hideExtractionProgress();
     state.currentChapterIndex = data.chapter_index;
     state.chapterData = data;
-    state.sentencesMap = data.sentences || {};
+    // Built locally from the blocks: the server no longer ships the same tokens
+    // a second time as a sid -> sentence map.
+    state.sentencesMap = buildSentenceMap(data);
     if (Array.isArray(data.toc) && data.toc.length) state.toc = data.toc;
 
     populateChapterSelect(data.chapters || [], data.chapter_index);
@@ -628,6 +630,20 @@ function goToSection(delta) {
   const target = state.currentChapterIndex + delta;
   if (target < 0 || (total && target > total - 1)) return;
   loadChapter(state.currentBook.book_id, target);
+}
+
+/** Indexes the sentences already present in the section's blocks, by sid. */
+function buildSentenceMap(data) {
+  const map = data.sentences && Object.keys(data.sentences).length ? data.sentences : {};
+  if (Object.keys(map).length) return map;
+
+  const built = {};
+  for (const block of data.blocks || []) {
+    for (const sentence of block.sentences || []) {
+      if (sentence && sentence.sid) built[sentence.sid] = sentence;
+    }
+  }
+  return built;
 }
 
 function renderTokenizedChapter(data) {

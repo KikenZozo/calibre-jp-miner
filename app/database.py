@@ -358,8 +358,15 @@ def store_extracted_book(
 
 
 def get_cached_book_section(
-    book_uuid: str, section_index: int
+    book_uuid: str, section_index: int, include_sentence_map: bool = False
 ) -> Optional[Dict[str, Any]]:
+    """
+    One section of a cached book.
+
+    `include_sentence_map` adds a sid -> sentence dictionary. It is off by default
+    because every token in it is already present inside `blocks`, and shipping both
+    doubled the size of a chapter response for nothing.
+    """
     conn = get_db_connection()
     book_meta = conn.execute(
         "SELECT * FROM books_cache WHERE book_uuid = ?", (book_uuid,)
@@ -407,24 +414,25 @@ def get_cached_book_section(
         (book_uuid, section_index),
     ).fetchone()
 
-    sent_rows = conn.execute(
-        """
-        SELECT * FROM book_sentences
-        WHERE book_uuid = ? AND section_index = ?
-        ORDER BY sentence_index ASC
-        """,
-        (book_uuid, section_index),
-    ).fetchall()
+    sentences_map: Dict[str, Any] = {}
+    if include_sentence_map:
+        sent_rows = conn.execute(
+            """
+            SELECT * FROM book_sentences
+            WHERE book_uuid = ? AND section_index = ?
+            ORDER BY sentence_index ASC
+            """,
+            (book_uuid, section_index),
+        ).fetchall()
+        for sr in sent_rows:
+            sentences_map[sr["sentence_id"]] = {
+                "sid": sr["sentence_id"],
+                "text": sr["text_plain"],
+                "tokens": json.loads(sr["tokens_json"]),
+            }
     conn.close()
 
     blocks = json.loads(sec_row["blocks_json"]) if sec_row else []
-    sentences_map = {}
-    for sr in sent_rows:
-        sentences_map[sr["sentence_id"]] = {
-            "sid": sr["sentence_id"],
-            "text": sr["text_plain"],
-            "tokens": json.loads(sr["tokens_json"]),
-        }
 
     chapters_list = [
         {"index": r["section_index"], "title": r["section_title"]} for r in all_secs

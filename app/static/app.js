@@ -501,8 +501,11 @@ async function loadChapter(bookId, chapterIndex, restoreScrollRatio = 0) {
 
     populateChapterSelect(data.chapters || [], data.chapter_index);
 
+    // A cover or a full-page plate is a section with illustrations and no prose.
+    // Counting only sentences here hid those pages behind "nothing to display"
+    // and threw the artwork away.
     const hasContent = (data.blocks || []).some(
-      (b) => (b.sentences || []).length > 0
+      (b) => (b.sentences || []).length > 0 || (b.type === "image" && b.src)
     );
     if (!data.total_chapters || !hasContent) {
       renderEmptyBookNotice(data);
@@ -631,6 +634,14 @@ function renderTokenizedChapter(data) {
   const article = document.getElementById("reader-content");
   article.innerHTML = "";
   const frag = document.createDocumentFragment();
+
+  // A cover or an illustration plate carries no prose: show it as a full page
+  // rather than as a small picture floating in an empty column.
+  const blocks = data.blocks || [];
+  const isPlate =
+    blocks.length > 0 &&
+    blocks.every((b) => b.type === "image" || !(b.sentences || []).length);
+  article.classList.toggle("is-plate", isPlate);
 
   for (const block of data.blocks || []) {
     if (block.type === "image") {

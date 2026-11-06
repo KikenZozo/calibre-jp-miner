@@ -989,9 +989,18 @@ async function loadPdfWordLayer(bookId, pageNumber, token, forceOcr) {
       badge.textContent = `🔍 OCR (${layout.ocr_lang}${
         layout.vertical ? ", vertical" : ""
       }) · ${layout.words.length} words`;
+    } else if (layout.source === "ocr-failed") {
+      // Say what actually went wrong rather than leaving "it does not work".
+      badge.textContent = "⚠️ OCR failed on this page";
+      setPdfMessage(
+        `<strong>OCR could not read this page.</strong><br/>${escapeHtml(
+          layout.ocr_reason || "No reason reported."
+        )}<br/><br/>The page itself is still displayed below.`
+      );
+      document.getElementById("pdf-stage").style.visibility = "visible";
     } else {
       badge.textContent = "⚠️ No text on this page";
-      if (!layout.ocr_available && layout.ocr_reason) {
+      if (layout.ocr_reason) {
         setPdfMessage(
           `<strong>This page is an image with no text layer, and OCR is unavailable.</strong><br/>${escapeHtml(
             layout.ocr_reason

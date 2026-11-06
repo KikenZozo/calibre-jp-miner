@@ -42,6 +42,13 @@ _PDF_LOCK = threading.Lock()
 # A page with fewer real characters than this is treated as an image-only scan.
 MIN_TEXT_LAYER_CHARS = 8
 
+# Enough characters that the page is certainly real text, whatever else is on it.
+DENSE_TEXT_CHARS = 120
+
+# A single image covering at least this share of the page means the page IS that
+# image, and whatever few characters sit on top of it are not the content.
+FULL_PAGE_IMAGE_RATIO = 0.6
+
 # How far the aligner may scan ahead to re-sync a token with the character stream.
 _ALIGN_LOOKAHEAD = 24
 
@@ -86,6 +93,40 @@ def _text_layer_lines(page: Any) -> List[Dict[str, Any]]:
                     }
                 )
     return lines
+
+
+def _page_is_scan(page: Any, text_chars: int) -> bool:
+    """
+    Decides whether a page is really an image that needs OCR.
+
+    Counting characters alone is not enough: plenty of scans carry a thin text
+    layer (page numbers, a publisher line, or a bad OCR baked in by the scanner),
+    which made the page look like a digital one and silently skipped OCR. A page
+    is treated as a scan when a single image covers most of it and there is far
+    too little text for that much surface.
+    """
+    if text_chars < MIN_TEXT_LAYER_CHARS:
+        return True
+    if text_chars >= DENSE_TEXT_CHARS:
+        return False
+
+    page_area = float(page.rect.width) * float(page.rect.height)
+    if page_area <= 0:
+        return False
+
+    try:
+        images = page.get_image_info()
+    except Exception:
+        return False
+
+    for info in images:
+        bbox = info.get("bbox")
+        if not bbox:
+            continue
+        covered = abs(bbox[2] - bbox[0]) * abs(bbox[3] - bbox[1])
+        if covered / page_area >= FULL_PAGE_IMAGE_RATIO:
+            return True
+    return False
 
 
 def _ocr_lines(page: Any) -> Tuple[List[Dict[str, Any]], str, bool]:
@@ -320,16 +361,25 @@ def build_page_layout(
             vertical = False
             source = "text-layer"
 
+            ocr_error = ""
             lines = [] if force_ocr else _text_layer_lines(page)
             total_chars = sum(len(l["chars"]) for l in lines)
 
-            if total_chars < MIN_TEXT_LAYER_CHARS:
+            if force_ocr or _page_is_scan(page, total_chars):
                 if allow_ocr and ocr_module.is_available():
-                    lines, ocr_lang, vertical = _ocr_lines(page)
-                    source = "ocr"
-                else:
+                    try:
+                        lines, ocr_lang, vertical = _ocr_lines(page)
+                        source = "ocr"
+                    except Exception as exc:
+                        # A failing OCR must not take the page down with it: the
+                        # scan still renders, and the reason reaches the UI instead
+                        # of a bare "it does not work".
+                        print(f"[OCR] page {page_number} failed: {exc}")
+                        ocr_error = f"{type(exc).__name__}: {exc}"
+                        lines = [] if force_ocr else lines
+                        source = "ocr-failed" if not lines else "text-layer"
+                elif not lines:
                     source = "none"
-                    lines = []
         finally:
             doc.close()
 
@@ -345,12 +395,15 @@ def build_page_layout(
         "ocr_lang": ocr_lang,
         "vertical": vertical,
         "ocr_available": ocr_module.is_available(),
-        "ocr_reason": "" if ocr_module.is_available() else ocr_module.ocr_status()["reason"],
+        "ocr_reason": ocr_error
+        or ("" if ocr_module.is_available() else ocr_module.ocr_status()["reason"]),
+        "text_layer_chars": total_chars,
         "words": words,
         "sentences": sentences,
     }
 
-    if source != "none":
+    # A failed OCR is not cached: the next attempt should try again.
+    if source not in ("none", "ocr-failed"):
         store_pdf_page_layout(book_uuid, page_number, source, layout)
         if persist_sentences and sentences:
             store_section_sentences(

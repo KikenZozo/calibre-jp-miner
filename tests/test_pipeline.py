@@ -296,6 +296,16 @@ def _build_illustrated_epub(path: Path) -> None:
 <p>　窓から優しい光が落ちて、机の上には一冊の新しい物語の本が置かれていた。</p>
 </body></html>"""
 
+    # The fixed-layout pattern almost every Japanese ebook uses for cover art and
+    # full-page plates: an <svg> wrapper with an <image xlink:href>, and no prose.
+    cover_page = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="ja">
+<head><title>表紙</title></head><body epub:type="cover">
+<div class="main"><svg xmlns="http://www.w3.org/2000/svg"
+ xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1127 1600">
+<image width="1127" height="1600" xlink:href="../images/cover.png"/></svg></div>
+</body></html>"""
+
     toc_page = """<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="ja"><head><title>目次</title></head>
 <body><h1>目次</h1><p><a href="chapter1.xhtml">第一章：古い扉</a></p></body></html>"""
@@ -307,17 +317,20 @@ def _build_illustrated_epub(path: Path) -> None:
 <dc:identifier id="BookId">urn:uuid:illus-test</dc:identifier></metadata>
 <manifest>
 <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+<item id="cover" href="text/cover.xhtml" media-type="application/xhtml+xml"/>
 <item id="tocpage" href="text/toc_page.xhtml" media-type="application/xhtml+xml"/>
 <item id="c1" href="text/chapter1.xhtml" media-type="application/xhtml+xml"/>
 <item id="img1" href="images/plate1.png" media-type="image/png"/>
+<item id="imgc" href="images/cover.png" media-type="image/png"/>
 </manifest>
-<spine toc="ncx"><itemref idref="tocpage"/><itemref idref="c1"/></spine></package>"""
+<spine toc="ncx"><itemref idref="cover"/><itemref idref="tocpage"/><itemref idref="c1"/></spine></package>"""
 
     ncx = """<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><head/>
 <docTitle><text>挿絵テスト</text></docTitle><navMap>
-<navPoint id="n0" playOrder="1"><navLabel><text>目次</text></navLabel><content src="text/toc_page.xhtml"/></navPoint>
-<navPoint id="n1" playOrder="2"><navLabel><text>第一章</text></navLabel><content src="text/chapter1.xhtml"/></navPoint>
+<navPoint id="n0" playOrder="1"><navLabel><text>表紙</text></navLabel><content src="text/cover.xhtml"/></navPoint>
+<navPoint id="n1" playOrder="2"><navLabel><text>目次</text></navLabel><content src="text/toc_page.xhtml"/></navPoint>
+<navPoint id="n2" playOrder="3"><navLabel><text>第一章</text></navLabel><content src="text/chapter1.xhtml"/></navPoint>
 </navMap></ncx>"""
 
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -331,7 +344,9 @@ def _build_illustrated_epub(path: Path) -> None:
         )
         zf.writestr("OEBPS/content.opf", opf)
         zf.writestr("OEBPS/toc.ncx", ncx)
+        zf.writestr("OEBPS/text/cover.xhtml", cover_page)
         zf.writestr("OEBPS/text/toc_page.xhtml", toc_page)
+        zf.writestr("OEBPS/images/cover.png", png(10, 14))
         zf.writestr("OEBPS/text/chapter1.xhtml", chapter)
         zf.writestr("OEBPS/images/plate1.png", png(8, 6))
 
@@ -363,7 +378,7 @@ def run_illustration_toc_and_vocabulary_tests() -> None:
         extract_book_into_cache(book)
 
         # 11. Illustrations survive extraction instead of being stripped with the markup
-        chapter = get_cached_book_section("test-illustrated", 1)
+        chapter = get_cached_book_section("test-illustrated", 2)
         assert chapter is not None
         image_blocks = [b for b in chapter["blocks"] if b["type"] == "image"]
         assert image_blocks, "illustration was dropped during extraction"
@@ -377,19 +392,32 @@ def run_illustration_toc_and_vocabulary_tests() -> None:
         text_blocks = [b for b in chapter["blocks"] if b.get("sentences")]
         assert len(text_blocks) >= 2, "text around the illustration was lost"
 
+        # 11b. Regression: a cover / full-page plate is a section with artwork and
+        #      NO prose. The reader used to decide a section was empty by counting
+        #      sentences only, so these pages rendered "nothing to display" and the
+        #      artwork was discarded. They must come through as image blocks, and the
+        #      <svg><image xlink:href> wrapper must be resolved like a plain <img>.
+        cover = get_cached_book_section("test-illustrated", 0)
+        cover_images = [b for b in cover["blocks"] if b["type"] == "image"]
+        cover_sentences = [b for b in cover["blocks"] if b.get("sentences")]
+        assert cover_images, "cover art (svg/xlink) was dropped"
+        assert cover_images[0]["src"] == "OEBPS/images/cover.png", cover_images[0]["src"]
+        assert not cover_sentences, "the cover page unexpectedly produced prose"
+        print("[OK] Image-only cover page survives as an image block (svg/xlink:href)")
+
         # 12. The book's own contents page is clickable
-        toc_page = get_cached_book_section("test-illustrated", 0)
+        toc_page = get_cached_book_section("test-illustrated", 1)
         linked = [b for b in toc_page["blocks"] if b.get("link_href")]
         assert linked, "contents-page link was not detected"
         assert linked[0]["link_href"] == "OEBPS/text/chapter1.xhtml"
-        assert linked[0]["link_target"] == 1, linked[0]["link_target"]
+        assert linked[0]["link_target"] == 2, linked[0]["link_target"]
         print(f"[OK] Contents link resolves to section {linked[0]['link_target']}")
 
         # 13. The NCX table of contents is parsed and addressable
         toc = chapter["toc"]
-        assert len(toc) == 2, toc
-        assert [t["title"] for t in toc] == ["目次", "第一章"]
-        assert [t["section_index"] for t in toc] == [0, 1], toc
+        assert len(toc) == 3, toc
+        assert [t["title"] for t in toc] == ["表紙", "目次", "第一章"]
+        assert [t["section_index"] for t in toc] == [0, 1, 2], toc
         print(f"[OK] Table of contents: {len(toc)} entries resolved to sections")
 
         # 14. A cache written by an older extractor is treated as stale
